@@ -1,9 +1,12 @@
 import useSWR from "swr";
 import type { GetFoldersResponse } from "@/app/api/user/folders/route";
-import { isMicrosoftProvider } from "@/utils/email/provider-types";
+import {
+  isImapProvider,
+  isMicrosoftProvider,
+} from "@/utils/email/provider-types";
 
 export function useFolders(provider: string, emailAccountId?: string) {
-  const enabled = isMicrosoftProvider(provider);
+  const enabled = isMicrosoftProvider(provider) || isImapProvider(provider);
   const key = emailAccountId
     ? ["/api/user/folders", emailAccountId]
     : "/api/user/folders";

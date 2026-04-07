@@ -40,16 +40,6 @@ import {
   type AutomaticUnsubscribeResult,
   unsubscribeSenderAndMark,
 } from "@/utils/senders/unsubscribe";
-import { getSenderUnsubscribeSource } from "@/utils/senders/source";
-import {
-  getCategorizationProgress,
-  getCategorizationStatusSnapshot,
-} from "@/utils/redis/categorization-progress";
-import {
-  extractErrorInfo as extractGmailErrorInfo,
-  isRetryableError as isGmailRetryableError,
-} from "@/utils/gmail/retry";
-import { microsoftGraphPageTokenSchema } from "@/utils/outlook/page-token";
 import { validateUserAndAiAccess } from "@/utils/user/validate";
 import { SafeError } from "@/utils/error";
 

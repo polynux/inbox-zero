@@ -1,5 +1,6 @@
 import {
   isGoogleProvider,
+  isImapProvider,
   isMicrosoftProvider,
 } from "@/utils/email/provider-types";
 import type { Logger } from "@/utils/logger";
@@ -75,6 +76,12 @@ export async function processProviderHistory({
           resourceData,
           logger,
         }));
+    return;
+  }
+
+  // IMAP uses polling, not webhooks - skip gracefully
+  if (isImapProvider(provider)) {
+    logger.info("Skipping webhook history processing for IMAP account");
     return;
   }
 

@@ -3,11 +3,13 @@ import {
   getOutlookClientForEmail,
 } from "@/utils/email-account-client";
 import { GmailProvider } from "@/utils/email/google";
+import { ImapProvider } from "@/utils/email/imap";
 import { OutlookProvider } from "@/utils/email/microsoft";
 import type { EmailProvider } from "@/utils/email/types";
 import { assertProviderNotRateLimited } from "@/utils/email/rate-limit";
 import { toRateLimitProvider } from "@/utils/email/rate-limit-mode-error";
 import { recordEmailAccountProviderIssue } from "@/utils/email/provider-health";
+import { getImapCredentials } from "@/utils/imap/credential";
 import type { Logger } from "@/utils/logger";
 import { flushLoggerSafely } from "@/utils/logger-flush";
 
@@ -37,6 +39,11 @@ export async function createEmailProvider({
         new GmailProvider(client, logger, emailAccountId),
         { emailAccountId, provider: rateLimitProvider, logger },
       );
+    }
+
+    if (rateLimitProvider === "imap") {
+      const credentials = await getImapCredentials(emailAccountId);
+      return new ImapProvider(credentials, logger);
     }
 
     const client = await getOutlookClientForEmail({ emailAccountId, logger });
@@ -223,4 +230,5 @@ function isPromiseLike(value: unknown): value is Promise<unknown> {
     "catch" in value &&
     typeof value.catch === "function"
   );
+}
 }

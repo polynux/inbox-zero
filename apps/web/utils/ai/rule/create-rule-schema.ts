@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { ActionType, LogicalOperator } from "@/generated/prisma/enums";
-import { isMicrosoftProvider } from "@/utils/email/provider-types";
+import {
+  isImapProvider,
+  isMicrosoftProvider,
+} from "@/utils/email/provider-types";
 import { isDefined } from "@/utils/types";
 import {
   getOnlyIntegrationToolSpec,
@@ -392,9 +395,11 @@ function createActionFieldShape(provider: string) {
     webhookUrl: optionalStringField(
       "The webhook URL to call. Only relevant for explicit webhook or external HTTP callback requests.",
     ),
-    ...(isMicrosoftProvider(provider) && {
-      folderName: optionalStringField("The folder to move the email to"),
-    }),
+    ...(isMicrosoftProvider(provider) || isImapProvider(provider)
+      ? {
+          folderName: optionalStringField("The folder to move the email to"),
+        }
+      : {}),
   };
 }
 
