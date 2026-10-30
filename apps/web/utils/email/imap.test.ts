@@ -40,6 +40,7 @@ function message(uid: number, date: string): FakeMessage {
 
 function createFakeClient(mailboxes: FakeMailbox[]) {
   const opened: string[] = [];
+  const fetchedUids: number[] = [];
   let current = mailboxes[0];
 
   function fetched(message: FakeMessage) {
@@ -85,9 +86,11 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
         return sequence > 0 ? [sequence] : [];
       },
     ),
-    fetchOne: vi.fn(async (sequence: string) =>
-      fetched(current.messages[Number(sequence) - 1]),
-    ),
+    fetchOne: vi.fn(async (sequence: string) => {
+      const message = current.messages[Number(sequence) - 1];
+      fetchedUids.push(message.uid);
+      return fetched(message);
+    }),
     fetch: vi.fn((range: string) => {
       const [start, end] = range.split(":");
       const last =
@@ -104,6 +107,7 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
   return {
     client: client as unknown as ImapFlow,
     opened,
+    fetchedUids,
   };
 }
 
@@ -231,5 +235,58 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     });
     expect(second.messages.map((m) => m.id)).toEqual(["1"]);
     expect(second.nextPageToken).toBeUndefined();
+  });
+});
+
+describe("ImapProvider.getMessagesWithAttachments pagination", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("pages through UID windows instead of refetching the newest messages", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01"),
+          message(2, "2026-02-01"),
+          message(3, "2026-03-01"),
+          message(4, "2026-04-01"),
+          message(5, "2026-05-01"),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const first = await new ImapProvider(config).getMessagesWithAttachments({
+      maxResults: 3,
+    });
+    expect(fake.fetchedUids).toEqual([5, 4, 3]);
+    expect(first.nextPageToken).toBe("3");
+
+    fake.fetchedUids.length = 0;
+    const second = await new ImapProvider(config).getMessagesWithAttachments({
+      maxResults: 3,
+      pageToken: first.nextPageToken,
+    });
+    expect(fake.fetchedUids).toEqual([2, 1]);
+    expect(second.nextPageToken).toBeUndefined();
+  });
+
+  it("returns no next page token when the window covers every message", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [message(1, "2026-01-01"), message(2, "2026-02-01")],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getMessagesWithAttachments({
+      maxResults: 3,
+    });
+
+    expect(fake.fetchedUids).toEqual([2, 1]);
+    expect(result.nextPageToken).toBeUndefined();
   });
 });

@@ -250,17 +250,28 @@ export class ImapProvider implements EmailProvider {
       await client.mailboxOpen("INBOX", { readOnly: true });
       // Search for messages with attachments is not universally supported
       // Fall back to text search
-      const uids = await searchImapMessages(
-        client,
-        { all: true },
-        options.maxResults || 20,
-      );
-      const messages = await fetchMessagesByUids(client, uids);
+      const allUids = await searchImapMessages(client, { all: true });
+      const lastSeenUid = options.pageToken
+        ? Number(options.pageToken)
+        : undefined;
+      const remainingUids = lastSeenUid
+        ? allUids.filter((uid) => uid < lastSeenUid)
+        : allUids;
+      const pageUids = remainingUids.slice(0, options.maxResults || 20);
+
+      const messages = await fetchMessagesByUids(client, pageUids);
       // Filter client-side for messages with attachments
       const withAttachments = messages.filter(
         (m) => m.attachments && m.attachments.length > 0,
       );
-      return { messages: withAttachments };
+
+      return {
+        messages: withAttachments,
+        nextPageToken:
+          remainingUids.length > pageUids.length
+            ? String(pageUids[pageUids.length - 1])
+            : undefined,
+      };
     });
   }
 
