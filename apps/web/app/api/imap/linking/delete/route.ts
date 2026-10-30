@@ -17,7 +17,12 @@ export const DELETE = withAuth("imap/linking/delete", async (request) => {
   }
 
   const emailAccount = await prisma.emailAccount.findFirst({
-    where: { id: parsed.data.emailAccountId, userId },
+    where: {
+      id: parsed.data.emailAccountId,
+      userId,
+      // Without this any provider's account could be unlinked here.
+      account: { provider: "imap" },
+    },
     select: { accountId: true },
   });
 
