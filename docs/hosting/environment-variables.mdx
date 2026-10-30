@@ -151,6 +151,7 @@ Reference for environment variables relevant to self-hosting Inbox Zero. Hosted-
 | `HEALTH_API_KEY` | No | API key for health checks | — |
 | `WEBHOOK_URL` | No | External webhook URL | — |
 | `WEBHOOK_ALLOW_PRIVATE_IPS` | No | Allow rule webhooks to target private, loopback, link-local, or Tailscale addresses. This disables SSRF protection for webhook delivery; enable it only on a trusted single-tenant deployment. | `false` |
+| `IMAP_ALLOW_PRIVATE_HOSTS` | No | Allow IMAP/SMTP hosts on loopback or private networks (e.g. Proton Mail Bridge on 127.0.0.1). Also skips TLS certificate verification for loopback hosts, which Bridge needs for its self-signed certificate. Metadata and link-local addresses stay blocked. Enable only on a trusted single-tenant deployment. | `false` |
 | `INTERNAL_API_URL` | No | Preferred callback base URL for QStash and server-side internal callbacks | `NEXT_PUBLIC_BASE_URL` |
 | `OAUTH_PROXY_URL` | No | OAuth proxy deployment URL used when callbacks should route through a separate proxy server | — |
 | `IS_OAUTH_PROXY_SERVER` | No | Marks this deployment as the OAuth proxy server | `false` |
