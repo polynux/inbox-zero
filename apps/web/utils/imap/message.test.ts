@@ -43,4 +43,36 @@ describe("parseSearchQuery", () => {
     const result = parseSearchQuery("important");
     expect(result).toEqual({ body: "important" });
   });
+
+  it("keeps a quoted field value as one term", () => {
+    const result = parseSearchQuery('subject:"weekly update"');
+    expect(result).toEqual({ subject: "weekly update" });
+  });
+
+  it("keeps a bare quoted phrase as one body term", () => {
+    const result = parseSearchQuery('"exact phrase"');
+    expect(result).toEqual({ body: "exact phrase" });
+  });
+
+  it("mixes quoted values with unquoted terms", () => {
+    const result = parseSearchQuery(
+      'from:alice@example.com subject:"weekly update" important',
+    );
+    expect(result).toEqual({
+      and: [
+        { from: "alice@example.com" },
+        { subject: "weekly update" },
+        { body: "important" },
+      ],
+    });
+  });
+
+  it("treats an unterminated quote as a single term", () => {
+    expect(parseSearchQuery('subject:"weekly update')).toEqual({
+      subject: "weekly update",
+    });
+    expect(parseSearchQuery('"exact phrase')).toEqual({
+      body: "exact phrase",
+    });
+  });
 });

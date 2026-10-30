@@ -271,32 +271,44 @@ function formatAddress(
 export function parseSearchQuery(query: string): Record<string, unknown> {
   const criteria: Record<string, unknown>[] = [];
 
-  const parts = query.match(/(\w+:[^\s]+|"[^"]*"|\S+)/g) || [];
+  // Quoted values (`subject:"weekly update"`) and bare phrases keep their
+  // spaces; an unterminated quote swallows the rest of the query.
+  const parts = query.match(/(\w+:"[^"]*"?|"[^"]*"?|\S+)/g) || [];
 
   for (const part of parts) {
-    if (part.startsWith("from:")) {
-      criteria.push({ from: part.slice(5) });
-    } else if (part.startsWith("to:")) {
-      criteria.push({ to: part.slice(3) });
-    } else if (part.startsWith("subject:")) {
-      criteria.push({ subject: part.slice(8) });
-    } else if (part === "is:unread") {
+    const fieldMatch = part.match(/^(\w+):([\s\S]*)$/);
+    const field = fieldMatch?.[1];
+    const value = fieldMatch ? unquote(fieldMatch[2]) : part;
+
+    if (part === "is:unread") {
       criteria.push({ unseen: true });
     } else if (part === "is:read") {
       criteria.push({ seen: true });
-    } else if (part.startsWith("since:") || part.startsWith("after:")) {
-      const dateStr = part.includes(":") ? part.split(":")[1] : "";
-      criteria.push({ since: new Date(dateStr) });
-    } else if (part.startsWith("before:")) {
-      criteria.push({ before: new Date(part.slice(7)) });
     } else if (part === "has:attachment") {
       criteria.push({ header: { "Content-Type": "multipart/mixed" } });
+    } else if (field === "from") {
+      criteria.push({ from: value });
+    } else if (field === "to") {
+      criteria.push({ to: value });
+    } else if (field === "subject") {
+      criteria.push({ subject: value });
+    } else if (field === "since" || field === "after") {
+      criteria.push({ since: new Date(value) });
+    } else if (field === "before") {
+      criteria.push({ before: new Date(value) });
     } else {
-      criteria.push({ body: part });
+      criteria.push({ body: unquote(part) });
     }
   }
 
   if (criteria.length === 0) return { all: true };
   if (criteria.length === 1) return criteria[0];
   return { and: criteria };
+}
+
+function unquote(value: string): string {
+  if (!value.startsWith('"')) return value;
+  const end =
+    value.length > 1 && value.endsWith('"') ? value.length - 1 : value.length;
+  return value.slice(1, end);
 }
