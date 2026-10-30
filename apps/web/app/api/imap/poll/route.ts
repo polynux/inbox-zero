@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { withError } from "@/utils/middleware";
+import { hasCronSecret } from "@/utils/cron";
 import { pollAllImapAccounts } from "@/utils/imap/poll";
 
 /**
@@ -7,12 +8,7 @@ import { pollAllImapAccounts } from "@/utils/imap/poll";
  * Should be called by an external scheduler (e.g., every 2-5 minutes).
  */
 export const POST = withError("imap/poll", async (request) => {
-  // Optional: verify a cron secret to prevent unauthorized polling
-  const authHeader = request.headers.get("authorization");
-  if (
-    process.env.CRON_SECRET &&
-    authHeader !== `Bearer ${process.env.CRON_SECRET}`
-  ) {
+  if (!hasCronSecret(request)) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
