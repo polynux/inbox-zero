@@ -1,12 +1,19 @@
 import { ImapFlow } from "imapflow";
+import { env } from "@/env";
+import { shouldBypassTlsVerification } from "@/utils/imap/tls";
 import type { ImapCredentialConfig } from "@/utils/imap/types";
 import { createScopedLogger } from "@/utils/logger";
 
 const logger = createScopedLogger("imap/client");
 
 const CONNECT_TIMEOUT_MS = 30_000;
-
 export function createImapConnection(config: ImapCredentialConfig): ImapFlow {
+  const tlsBypass =
+    config.imapSecurity !== "none" &&
+    shouldBypassTlsVerification(config.imapHost, {
+      allowPrivateHosts: env.IMAP_ALLOW_PRIVATE_HOSTS,
+    });
+
   return new ImapFlow({
     host: config.imapHost,
     port: config.imapPort,
@@ -17,7 +24,7 @@ export function createImapConnection(config: ImapCredentialConfig): ImapFlow {
     },
     logger: false,
     tls: {
-      rejectUnauthorized: config.imapSecurity !== "none",
+      rejectUnauthorized: !tlsBypass,
     },
   });
 }

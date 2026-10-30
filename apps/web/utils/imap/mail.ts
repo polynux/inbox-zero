@@ -1,10 +1,18 @@
 import nodemailer from "nodemailer";
 import type { Attachment as MailAttachment } from "nodemailer/lib/mailer";
+import { env } from "@/env";
+import { shouldBypassTlsVerification } from "@/utils/imap/tls";
 import type { ImapCredentialConfig } from "@/utils/imap/types";
 import { createScopedLogger } from "@/utils/logger";
-const logger = createScopedLogger("imap/mail");
 
+const logger = createScopedLogger("imap/mail");
 function createSmtpTransport(config: ImapCredentialConfig) {
+  const tlsBypass =
+    config.smtpSecurity !== "none" &&
+    shouldBypassTlsVerification(config.smtpHost, {
+      allowPrivateHosts: env.IMAP_ALLOW_PRIVATE_HOSTS,
+    });
+
   return nodemailer.createTransport({
     host: config.smtpHost,
     port: config.smtpPort,
@@ -14,7 +22,7 @@ function createSmtpTransport(config: ImapCredentialConfig) {
       pass: config.password,
     },
     tls: {
-      rejectUnauthorized: config.smtpSecurity !== "none",
+      rejectUnauthorized: !tlsBypass,
     },
   });
 }
@@ -36,7 +44,6 @@ export async function sendSmtpEmail(
   },
 ): Promise<{ messageId: string }> {
   const transport = createSmtpTransport(config);
-
   try {
     const result = await transport.sendMail({
       from: options.from || config.email,
