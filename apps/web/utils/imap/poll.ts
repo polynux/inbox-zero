@@ -42,7 +42,8 @@ export async function pollImapAccount(
       }
 
       const lastSeenUid = credential.lastSeenUid || 0;
-      const uidNext = (mailbox.uidNext as number) || 0;
+      const uidNext =
+        mailbox.uidNext === undefined ? 0 : Number(mailbox.uidNext);
 
       if (uidNext <= lastSeenUid) {
         // No new messages

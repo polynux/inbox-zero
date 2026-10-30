@@ -431,7 +431,6 @@ export interface EmailProvider {
     draftId: string,
     attachmentId: string,
   ): Promise<DraftAttachmentsResult>;
-  readonly name: "google" | "microsoft" | "imap";
   removeThreadLabel(threadId: string, labelId: string): Promise<void>;
   removeThreadLabels(threadId: string, labelIds: string[]): Promise<void>;
   renameFolder(folderId: string, name: string): Promise<void>;

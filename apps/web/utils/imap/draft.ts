@@ -53,6 +53,7 @@ export async function saveDraft(
     new Date(),
   );
 
+  if (!result) throw new Error("Failed to save draft: APPEND rejected");
   return result.uid
     ? String(result.uid)
     : result.uidValidity

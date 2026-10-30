@@ -1,7 +1,7 @@
 import nodemailer from "nodemailer";
+import type { Attachment as MailAttachment } from "nodemailer/lib/mailer";
 import type { ImapCredentialConfig } from "@/utils/imap/types";
 import { createScopedLogger } from "@/utils/logger";
-
 const logger = createScopedLogger("imap/mail");
 
 function createSmtpTransport(config: ImapCredentialConfig) {
@@ -32,11 +32,7 @@ export async function sendSmtpEmail(
     replyTo?: string;
     inReplyTo?: string;
     references?: string;
-    attachments?: Array<{
-      filename: string;
-      content: string | Buffer;
-      contentType?: string;
-    }>;
+    attachments?: MailAttachment[];
   },
 ): Promise<{ messageId: string }> {
   const transport = createSmtpTransport(config);
@@ -53,11 +49,7 @@ export async function sendSmtpEmail(
       replyTo: options.replyTo,
       inReplyTo: options.inReplyTo,
       references: options.references,
-      attachments: options.attachments?.map((a) => ({
-        filename: a.filename,
-        content: a.content,
-        contentType: a.contentType,
-      })),
+      attachments: options.attachments,
     });
 
     logger.info("Email sent via SMTP", {

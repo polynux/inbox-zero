@@ -1,13 +1,26 @@
 import type { Attachment as MailAttachment } from "nodemailer/lib/mailer";
 import type { ImapFlow } from "imapflow";
-import type { ThreadsQuery } from "@/app/api/threads/validation";
+import type { ThreadsQuery } from "@/utils/threads/validation";
+import type { LocalMailSyncRequest } from "@/utils/actions/local-mail-sync.validation";
+import type { EmailContact } from "@/utils/email/contact";
+import type { SendAsAddress } from "@/utils/email/send-as";
 import type {
+  BulkArchiveResult,
+  BulkArchiveThread,
+  DraftAttachmentUploadStart,
+  DraftAttachmentsResult,
   EmailFilter,
+  EmailFolderCount,
   EmailLabel,
+  EmailLabelUpdate,
   EmailProvider,
   EmailSignature,
   EmailThread,
+  GetThreadOptions,
+  MailboxSyncPage,
+  SentMessagePage,
 } from "@/utils/email/types";
+import type { LocalMailSyncResponse } from "@/utils/email/local-mail-sync-types";
 import type { OutlookFolder } from "@/utils/outlook/folders";
 import type { InboxZeroLabel } from "@/utils/label";
 import type { Logger } from "@/utils/logger";
@@ -23,6 +36,11 @@ import {
   parseSearchQuery,
   searchImapMessages,
 } from "@/utils/imap/message";
+import {
+  getImapMailFoldersPage,
+  getImapMailboxSyncPage,
+} from "@/utils/imap/local-mail-sync";
+import type { DraftAttachmentMetadata } from "@/utils/actions/draft-attachments.validation";
 import {
   findArchiveFolder,
   findDraftsFolder,
@@ -235,7 +253,10 @@ export class ImapProvider implements EmailProvider {
 
   // --- Thread Operations ---
 
-  async getThread(threadId: string): Promise<EmailThread> {
+  async getThread(
+    threadId: string,
+    _options?: GetThreadOptions,
+  ): Promise<EmailThread> {
     const messages = await this.getThreadMessages(threadId);
     if (messages.length === 0) {
       throw new Error(`Thread ${threadId} not found`);
@@ -427,9 +448,7 @@ export class ImapProvider implements EmailProvider {
   async getLabels(_options?: {
     includeHidden?: boolean;
   }): Promise<EmailLabel[]> {
-    return this.withConnection(async (client) => {
-      return listFolders(client);
-    });
+    return this.withConnection(async (client) => listFolders(client));
   }
 
   async getLabelById(labelId: string): Promise<EmailLabel | null> {
@@ -690,7 +709,8 @@ export class ImapProvider implements EmailProvider {
     maxResults: number;
     after?: Date;
     before?: Date;
-  }): Promise<{ id: string; threadId: string }[]> {
+    pageToken?: string;
+  }): Promise<SentMessagePage> {
     return this.withConnection(async (client) => {
       const sentFolder = await findSentFolder(client);
       await client.mailboxOpen(sentFolder, { readOnly: true });
@@ -699,13 +719,16 @@ export class ImapProvider implements EmailProvider {
       if (options.after) criteria.since = options.after;
       if (options.before) criteria.before = options.before;
 
-      const uids = await searchImapMessages(
-        client,
-        criteria,
-        options.maxResults,
-      );
-      const messages = await fetchMessagesByUids(client, uids);
-      return messages.map((m) => ({ id: m.id, threadId: m.threadId }));
+      const offset = options.pageToken ? Number(options.pageToken) : 0;
+      const allUids = await searchImapMessages(client, criteria);
+      const pageUids = allUids.slice(offset, offset + options.maxResults);
+      const messages = await fetchMessagesByUids(client, pageUids);
+      const nextOffset = offset + options.maxResults;
+      return {
+        messages: messages.map((m) => ({ id: m.id, threadId: m.threadId })),
+        nextPageToken:
+          nextOffset < allUids.length ? String(nextOffset) : undefined,
+      };
     });
   }
 
@@ -755,13 +778,14 @@ export class ImapProvider implements EmailProvider {
     subject: string;
     messageText: string;
     attachments?: MailAttachment[];
-  }): Promise<void> {
-    await sendSmtpEmail(this.config, {
+  }): Promise<{ messageId: string }> {
+    return sendSmtpEmail(this.config, {
       to: args.to,
       cc: args.cc,
       bcc: args.bcc,
       subject: args.subject,
       text: args.messageText,
+      attachments: args.attachments,
     });
   }
 
@@ -815,16 +839,20 @@ export class ImapProvider implements EmailProvider {
     options?: {
       replyTo?: string;
       from?: string;
+      cc?: string;
+      bcc?: string;
       attachments?: MailAttachment[];
     },
-  ): Promise<void> {
+  ): Promise<{ messageId: string }> {
     const replySubject = email.subject.startsWith("Re:")
       ? email.subject
       : `Re: ${email.subject}`;
 
-    await sendSmtpEmail(this.config, {
+    return sendSmtpEmail(this.config, {
       to: email.headers.from,
       from: options?.from,
+      cc: options?.cc,
+      bcc: options?.bcc,
       subject: replySubject,
       html: content,
       replyTo: options?.replyTo,
@@ -832,13 +860,14 @@ export class ImapProvider implements EmailProvider {
       references: email.headers.references
         ? `${email.headers.references} ${email.headers["message-id"]}`
         : email.headers["message-id"],
+      attachments: options?.attachments,
     });
   }
 
   async forwardEmail(
     email: ParsedMessage,
     args: { to: string; cc?: string; bcc?: string; content?: string },
-  ): Promise<void> {
+  ): Promise<{ messageId: string }> {
     const fwdSubject = email.subject.startsWith("Fwd:")
       ? email.subject
       : `Fwd: ${email.subject}`;
@@ -855,7 +884,7 @@ To: ${email.headers.to}<br/>
 ${email.textHtml || email.textPlain || ""}
     `.trim();
 
-    await sendSmtpEmail(this.config, {
+    return sendSmtpEmail(this.config, {
       to: args.to,
       cc: args.cc,
       bcc: args.bcc,
@@ -942,11 +971,12 @@ ${email.textHtml || email.textPlain || ""}
     throw new UnsupportedImapOperationError("updateDraft");
   }
 
-  async deleteDraft(draftId: string): Promise<void> {
+  async deleteDraft(draftId: string, _version?: string): Promise<boolean> {
     return this.withConnection(async (client) => {
       const draftsFolder = await findDraftsFolder(client);
       await client.mailboxOpen(draftsFolder);
       await client.messageDelete(draftId, { uid: true });
+      return true;
     });
   }
 
@@ -959,15 +989,15 @@ ${email.textHtml || email.textPlain || ""}
   // --- Folders ---
 
   async getFolders(): Promise<OutlookFolder[]> {
-    return this.withConnection(async (client) => {
-      return listFoldersAsOutlookFolders(client);
-    });
+    return this.withConnection(async (client) =>
+      listFoldersAsOutlookFolders(client),
+    );
   }
 
   async getOrCreateFolderIdByName(folderName: string): Promise<string> {
-    return this.withConnection(async (client) => {
-      return getOrCreateFolder(client, folderName);
-    });
+    return this.withConnection(async (client) =>
+      getOrCreateFolder(client, folderName),
+    );
   }
 
   // --- Filters (not supported) ---
@@ -1071,6 +1101,400 @@ ${email.textHtml || email.textPlain || ""}
 
   isReplyInThread(message: ParsedMessage): boolean {
     return !!(message.headers["in-reply-to"] || message.headers.references);
+  }
+
+  // --- Batch message state (UIDs are per-folder; INBOX is assumed, and
+  // missing messages are skipped like the Microsoft 404-tolerant batches) ---
+
+  async archiveMessages(
+    messageIds: string[],
+    _labelId?: string,
+  ): Promise<void> {
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      const archiveFolder = await findArchiveFolder(client);
+      for (const messageId of new Set(messageIds)) {
+        try {
+          await moveMessageToFolder(client, Number(messageId), archiveFolder);
+        } catch {
+          // Message may live in another folder
+        }
+      }
+    });
+  }
+
+  async unarchiveMessages(messageIds: string[]): Promise<void> {
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      for (const messageId of new Set(messageIds)) {
+        try {
+          await moveMessageToFolder(client, Number(messageId), "INBOX");
+        } catch {
+          // Message may live in another folder
+        }
+      }
+    });
+  }
+
+  async trashMessages(messageIds: string[]): Promise<void> {
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      const trashFolder = await findTrashFolder(client);
+      for (const messageId of new Set(messageIds)) {
+        try {
+          await moveMessageToFolder(client, Number(messageId), trashFolder);
+        } catch {
+          // Message may live in another folder
+        }
+      }
+    });
+  }
+
+  async untrashMessages(messageIds: string[]): Promise<void> {
+    return this.unarchiveMessages(messageIds);
+  }
+
+  async markMessagesReadState(
+    messageIds: string[],
+    read: boolean,
+  ): Promise<void> {
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      for (const messageId of new Set(messageIds)) {
+        try {
+          if (read) {
+            await client.messageFlagsAdd(String(messageId), ["\\Seen"], {
+              uid: true,
+            });
+          } else {
+            await client.messageFlagsRemove(String(messageId), ["\\Seen"], {
+              uid: true,
+            });
+          }
+        } catch {
+          // Message may live in another folder
+        }
+      }
+    });
+  }
+
+  async markMessagesStarredState(
+    messageIds: string[],
+    starred: boolean,
+  ): Promise<void> {
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      for (const messageId of new Set(messageIds)) {
+        try {
+          if (starred) {
+            await client.messageFlagsAdd(String(messageId), ["\\Flagged"], {
+              uid: true,
+            });
+          } else {
+            await client.messageFlagsRemove(String(messageId), ["\\Flagged"], {
+              uid: true,
+            });
+          }
+        } catch {
+          // Message may live in another folder
+        }
+      }
+    });
+  }
+
+  async starMessage(messageId: string): Promise<void> {
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      await client.messageFlagsAdd(String(messageId), ["\\Flagged"], {
+        uid: true,
+      });
+    });
+  }
+
+  async markNotSpam(threadId: string): Promise<void> {
+    const messages = await this.getThreadMessages(threadId);
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      for (const msg of messages) {
+        try {
+          await moveMessageToFolder(client, Number(msg.id), "INBOX");
+        } catch {
+          // Message might already be in the inbox
+        }
+      }
+    });
+  }
+
+  async unarchiveThread(threadId: string): Promise<void> {
+    const messages = await this.getThreadMessages(threadId);
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      for (const msg of messages) {
+        try {
+          await moveMessageToFolder(client, Number(msg.id), "INBOX");
+        } catch {
+          // Message might already be in the inbox
+        }
+      }
+    });
+  }
+
+  async untrashThread(threadId: string): Promise<void> {
+    return this.unarchiveThread(threadId);
+  }
+
+  async bulkArchiveSenderOrThrow(
+    fromEmail: string,
+    _ownerEmail: string,
+    _emailAccountId: string,
+  ): Promise<number> {
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      const archiveFolder = await findArchiveFolder(client);
+      const uids = await searchImapMessages(client, { from: fromEmail });
+      for (const uid of uids) {
+        await moveMessageToFolder(client, uid, archiveFolder);
+      }
+      return uids.length;
+    });
+  }
+
+  async bulkArchiveThreads(
+    threads: BulkArchiveThread[],
+    _ownerEmail: string,
+  ): Promise<BulkArchiveResult> {
+    const succeededThreadIds: string[] = [];
+    const failedThreadIds: string[] = [];
+    await this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX");
+      const archiveFolder = await findArchiveFolder(client);
+      for (const thread of threads) {
+        try {
+          for (const messageId of thread.messageIds) {
+            await moveMessageToFolder(client, Number(messageId), archiveFolder);
+          }
+          succeededThreadIds.push(thread.threadId);
+        } catch {
+          failedThreadIds.push(thread.threadId);
+        }
+      }
+    });
+    return { succeededThreadIds, failedThreadIds };
+  }
+
+  async countMessages(options: {
+    folderId?: string;
+    labelId?: string;
+  }): Promise<number> {
+    return this.withConnection(async (client) => {
+      const folder = options.folderId || options.labelId || "INBOX";
+      const mailbox = await client.mailboxOpen(folder, { readOnly: true });
+      return mailbox.exists || 0;
+    });
+  }
+
+  async searchThreads(options: {
+    query: string;
+    maxResults?: number;
+    pageToken?: string;
+    messageFormat?: "full" | "metadata";
+    includeSpamTrash?: boolean;
+    folder?: "spam" | "trash";
+    labelIds?: string[];
+  }): Promise<{ threads: EmailThread[]; nextPageToken?: string }> {
+    const { messages, nextPageToken } = await this.getMessagesWithPagination({
+      query: options.query,
+      maxResults: options.maxResults,
+      pageToken: options.pageToken,
+    });
+    const threadMap = new Map<string, ParsedMessage[]>();
+    for (const msg of messages) {
+      const existing = threadMap.get(msg.threadId) || [];
+      existing.push(msg);
+      threadMap.set(msg.threadId, existing);
+    }
+    return {
+      threads: [...threadMap.entries()].map(([id, msgs]) => ({
+        id,
+        messages: msgs,
+        snippet: msgs[msgs.length - 1].snippet,
+      })),
+      nextPageToken,
+    };
+  }
+
+  async searchContacts(_query: string): Promise<EmailContact[]> {
+    // IMAP has no contacts API
+    return [];
+  }
+
+  async getContactPhotos(): Promise<Record<string, string>> {
+    // IMAP has no contact photos API
+    return {};
+  }
+
+  async getForwardingAddresses(): Promise<string[]> {
+    // IMAP has no equivalent of Gmail's verified forwarding addresses list
+    return [];
+  }
+
+  async getSendAsAddresses(): Promise<SendAsAddress[]> {
+    // IMAP sends from the account address
+    return [];
+  }
+
+  async getFolderCounts(): Promise<EmailFolderCount[]> {
+    return this.withConnection(async (client) => {
+      const labels = await listFolders(client);
+      const counts: EmailFolderCount[] = [];
+      for (const label of labels) {
+        try {
+          const status = await client.status(label.id, {
+            messages: true,
+            unseen: true,
+          });
+          counts.push({
+            id: label.id,
+            name: label.name,
+            total: status.messages || 0,
+            unread: status.unseen || 0,
+          });
+        } catch {
+          counts.push({ id: label.id, name: label.name, total: 0, unread: 0 });
+        }
+      }
+      return counts;
+    });
+  }
+
+  async renameFolder(folderId: string, name: string): Promise<void> {
+    return this.withConnection(async (client) => {
+      await client.mailboxRename(folderId, name);
+    });
+  }
+
+  async deleteFolder(folderId: string): Promise<void> {
+    return this.withConnection(async (client) => {
+      await client.mailboxDelete(folderId);
+    });
+  }
+
+  async updateLabel(labelId: string, update: EmailLabelUpdate): Promise<void> {
+    if (
+      update.color ||
+      update.labelListVisibility ||
+      update.messageListVisibility
+    )
+      throw new Error("IMAP folders have no color or visibility settings");
+    if (!update.name) throw new Error("IMAP folder rename requires a name");
+    return this.renameFolder(labelId, update.name);
+  }
+
+  async getMessageSource(messageId: string): Promise<Buffer> {
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen("INBOX", { readOnly: true });
+      const downloaded = await client.download(String(messageId), undefined, {
+        uid: true,
+      });
+      const chunks: Buffer[] = [];
+      for await (const chunk of downloaded.content) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      return Buffer.concat(chunks);
+    });
+  }
+
+  async getAttachmentStream(
+    _messageId: string,
+    _attachmentId: string,
+    _signal?: AbortSignal,
+  ): Promise<ReadableStream<Uint8Array>> {
+    throw new UnsupportedImapOperationError("getAttachmentStream");
+  }
+
+  async getDraftReferenceForMessage(
+    _messageId: string,
+  ): Promise<{ id: string; version?: string } | null> {
+    // IMAP drafts are raw APPENDs with no link back to the source message
+    return null;
+  }
+
+  async getDraftAttachments(
+    _draftId: string,
+  ): Promise<DraftAttachmentsResult | null> {
+    // IMAP drafts are raw APPENDs with no attachment metadata tracking
+    return null;
+  }
+
+  async addDraftAttachment(
+    _draftId: string,
+    _attachment: DraftAttachmentMetadata & { content: Buffer },
+  ): Promise<DraftAttachmentsResult & { attachmentId: string }> {
+    throw new UnsupportedImapOperationError("addDraftAttachment");
+  }
+
+  async removeDraftAttachment(
+    _draftId: string,
+    _attachmentId: string,
+  ): Promise<DraftAttachmentsResult> {
+    throw new UnsupportedImapOperationError("removeDraftAttachment");
+  }
+
+  async startDraftAttachmentUpload(
+    _draftId: string,
+    _attachment: DraftAttachmentMetadata,
+  ): Promise<DraftAttachmentUploadStart> {
+    throw new UnsupportedImapOperationError("startDraftAttachmentUpload");
+  }
+
+  // --- Local mail sync (UID-based folder-delta) ---
+
+  readonly localMailSyncStrategy = "folder-delta" as const;
+
+  async syncLocalMail(
+    request: LocalMailSyncRequest,
+    context: { emailAccountId: string },
+  ): Promise<LocalMailSyncResponse> {
+    if (!context.emailAccountId)
+      throw new Error("Local mail account context is required");
+    if (request.phase === "capabilities")
+      return {
+        status: "ok",
+        phase: request.phase,
+        result: {
+          strategy: this.localMailSyncStrategy,
+          excludedFolderIds: [],
+          maxHydrationMessages: 1,
+        },
+      };
+    if (request.phase === "folders")
+      return {
+        status: "ok",
+        phase: request.phase,
+        result: await getImapMailFoldersPage({
+          config: this.config,
+          logger: this.logger,
+          emailAccountId: context.emailAccountId,
+          limit: request.limit,
+          parentFolderId: request.parentFolderId,
+          cursor: request.cursor,
+        }),
+      };
+    return { status: "unsupported", strategy: this.localMailSyncStrategy };
+  }
+
+  async getMailboxSyncPage(options: {
+    after?: Date;
+    cursor?: string;
+    folderId?: string;
+    limit: number;
+  }): Promise<MailboxSyncPage> {
+    return getImapMailboxSyncPage({
+      config: this.config,
+      logger: this.logger,
+      emailAccountId: this.config.emailAccountId,
+      ...options,
+    });
   }
 
   // --- Watch (polling-based, no push) ---

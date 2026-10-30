@@ -88,7 +88,7 @@ function withProviderFailureLogging(
     logger,
   }: {
     emailAccountId: string;
-    provider: "google" | "microsoft";
+    provider: "google" | "microsoft" | "imap";
     logger: Logger;
   },
 ): EmailProvider {
@@ -160,7 +160,7 @@ async function logProviderOperationFailure({
 }: {
   error: unknown;
   emailAccountId: string;
-  provider: "google" | "microsoft";
+  provider: "google" | "microsoft" | "imap";
   logger: Logger;
   operation: string;
   failedAccessToken?: string;
@@ -215,7 +215,7 @@ async function recordProviderIssueSafely({
 type ProviderOperationFailureLogInput = {
   error: unknown;
   emailAccountId: string;
-  provider: "google" | "microsoft";
+  provider: "google" | "microsoft" | "imap";
   logger: Logger;
   operation: string;
   failedAccessToken?: string;
@@ -230,5 +230,4 @@ function isPromiseLike(value: unknown): value is Promise<unknown> {
     "catch" in value &&
     typeof value.catch === "function"
   );
-}
 }

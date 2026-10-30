@@ -9,6 +9,7 @@ import { GmailLabel } from "@/utils/gmail/label";
 const DEFAULT_LABEL_COUNT: Record<EmailProvider["name"], number> = {
   google: 13,
   microsoft: 8,
+  imap: 0,
 };
 
 export async function assessUser({
