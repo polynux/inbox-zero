@@ -53,9 +53,9 @@ describe("getRootMessageId", () => {
     expect(result).toBe("parent@ex.com");
   });
 
-  it("falls back to messageId when no threading headers", () => {
-    const result = getRootMessageId(undefined, undefined, "<only@ex.com>");
-    expect(result).toBe("<only@ex.com>");
+  it("strips angle brackets from the messageId fallback", () => {
+    const result = getRootMessageId(undefined, undefined, " <only@ex.com> ");
+    expect(result).toBe("only@ex.com");
   });
 
   it("returns 'unknown' when all headers are missing", () => {
@@ -78,6 +78,12 @@ describe("buildThreadId", () => {
     );
     // Both should hash the same root: "root@ex.com"
     expect(id1).toBe(id2);
+  });
+
+  it("hashes a root message and its reply to the same thread", () => {
+    const root = buildThreadId(undefined, undefined, "<abc@x>");
+    const reply = buildThreadId("<abc@x>", "<abc@x>", "<def@x>");
+    expect(root).toBe(reply);
   });
 
   it("returns different hashes for different threads", () => {

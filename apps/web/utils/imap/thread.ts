@@ -34,7 +34,12 @@ export function getRootMessageId(
     if (ids.length > 0) return ids[0];
   }
 
-  return messageId || "unknown";
+  if (messageId) {
+    const ids = parseMessageIdList(messageId);
+    if (ids.length > 0) return ids[0];
+  }
+
+  return "unknown";
 }
 
 /**
