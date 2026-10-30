@@ -187,8 +187,9 @@ export class ImapProvider implements EmailProvider {
             uid: true,
             envelope: true,
             flags: true,
+            bodyStructure: true,
           })) {
-            const parsed = await convertImapMessage(msg);
+            const parsed = await convertImapMessage(msg, undefined, folder);
             if (parsed) collected.push(parsed);
           }
           continue;

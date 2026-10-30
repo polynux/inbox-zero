@@ -40,8 +40,9 @@ function message(uid: number, date: string): FakeMessage {
 
 function createFakeClient(mailboxes: FakeMailbox[]) {
   const opened: string[] = [];
-  const fetchedUids: number[] = [];
   let current = mailboxes[0];
+  const fetchedUids: number[] = [];
+  const fetchQueries: Array<Record<string, unknown> | undefined> = [];
 
   function fetched(message: FakeMessage) {
     return {
@@ -91,7 +92,8 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       fetchedUids.push(message.uid);
       return fetched(message);
     }),
-    fetch: vi.fn((range: string) => {
+    fetch: vi.fn((range: string, query?: Record<string, unknown>) => {
+      fetchQueries.push(query);
       const [start, end] = range.split(":");
       const last =
         end === "*" ? current.messages.length : Number.parseInt(end, 10);
@@ -108,6 +110,7 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
     client: client as unknown as ImapFlow,
     opened,
     fetchedUids,
+    fetchQueries,
   };
 }
 
@@ -131,6 +134,19 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     expect(fake.opened).toEqual(["INBOX"]);
     expect(result.messages.map((m) => m.id)).toEqual(["2", "1"]);
     expect(result.nextPageToken).toBeUndefined();
+  });
+  it("fetches bodyStructure in the simple INBOX listing", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    connection.client = fake.client;
+
+    await new ImapProvider(config).getMessagesWithPagination({});
+
+    expect(fake.fetchQueries.length).toBeGreaterThan(0);
+    for (const query of fake.fetchQueries) {
+      expect(query).toMatchObject({ bodyStructure: true });
+    }
   });
 
   it("searches only the \\All mailbox when the server lists one", async () => {
