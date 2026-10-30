@@ -34,22 +34,41 @@ skips verification **only when both hold**:
 Remote hosts always verify. See `apps/web/utils/imap/tls.ts` and its
 tests. The shipped default stays deny-all.
 
+STARTTLS is used when selected, never opportunistically: imapflow runs with
+`doSTARTTLS: true` and nodemailer with `requireTLS: true`, so a server (or a
+MITM) that hides the STARTTLS capability fails the connection instead of
+continuing in cleartext.
+
+`security: none` is only accepted for loopback hosts (`localhost`,
+`127.0.0.1`, `::1`); both IMAP credential schemas reject it for any other
+host, since the password would cross the network in the clear.
+
 ## Setup
 
 1. Install Bridge, add your account (paid Proton plan required), and copy
    the Bridge password from Mailbox details.
-2. Set `IMAP_ALLOW_PRIVATE_HOSTS=true` (server env, e.g. `.env.local`).
+2. Sign in to Inbox Zero with Google, Microsoft, or SSO first. Password
+   sign-up is disabled (`emailAndPassword: { enabled: false }` in
+   `apps/web/utils/auth.ts`); the IMAP account is linked to an existing user,
+   it never creates one.
+3. Set `IMAP_ALLOW_PRIVATE_HOSTS=true` (server env, e.g. `.env.local`).
    Also documented in `docs/hosting/environment-variables.mdx`.
-3. Set `CRON_SECRET` to a generated value (`openssl rand -hex 32`).
-4. Add the account in Settings → Accounts → Add IMAP Account → select the
+4. Set `CRON_SECRET` to a generated value (`openssl rand -hex 32`).
+5. Add the account in Settings → Accounts → Add IMAP Account → select the
    `ProtonMail Bridge` preset → use the Bridge password → Test Connection.
-5. Trigger polling locally with the cron secret:
+6. Trigger polling locally with the cron secret:
    `curl -X POST -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/imap/poll`
    (see `apps/web/app/api/imap/poll/route.ts`; fails closed with 401 when
    `CRON_SECRET` is unset). Production uses the Docker Compose `cron`
    container; any external scheduler hitting the endpoint every 2–5 minutes
    works.
-6. If port 1025/1143 is taken locally, move the other service (commonly
+   **What polling does and does not do**: `/api/imap/poll` opens INBOX, and if
+   `UIDNEXT` is past the stored `lastSeenUid` it advances that cursor and
+   reports the count. It does **not** hand the new messages to anything else:
+   no rules run, no AI processing, no draft generation. `utils/webhook/process-history.ts`
+   skips IMAP accounts outright, so the automation that Gmail/Outlook get on
+   new mail has no IMAP equivalent yet.
+7. If port 1025/1143 is taken locally, move the other service (commonly
    Mailpit on 1025) or bump Bridge's ports in Settings → Advanced settings
    → Default ports → Change, then match the ports in the form.
 
@@ -75,6 +94,7 @@ EHLO/auth check. Read-only; user runs it against their own Bridge.
 | Drafts | code-verified | `saveDraft` APPENDs with `\Draft`; creates the Drafts folder when missing, else a clear error. `sendDraft`/`updateDraft` explicitly unsupported |
 | Search | code-verified, INBOX-only by default | `parseSearchQuery` covers from/to/subject/body/phrases/dates; `inboxOnly: false` searches Bridge's `\All` mailbox when listed, else every selectable mailbox except trash/junk/drafts |
 | Local mail sync | code-verified | `getImapMailboxSyncPage` delta/snapshot with UIDVALIDITY reset handling |
+| Automation on new mail (rules, AI) | not implemented | `/api/imap/poll` only advances `lastSeenUid` and counts messages; nothing consumes them. `utils/webhook/process-history.ts` returns early for IMAP, so rules/assistant never see a newly arrived IMAP message |
 | AI assistant | code-verified (provider surface) | `ImapProvider` implements the full `EmailProvider` interface and is constructed by the provider factory, so assistant flows run against it; answer quality on real mail is a **needs live check** |
 | Attachments (list) | code-verified | `convertImapMessage` populates filename/mimeType/size/part-id metadata from `bodyStructure`; `attachments` drives rules/AI, `inline` holds inline parts |
 | Attachment download | unsupported by design | `getAttachment`/`getAttachmentStream` throw `UnsupportedImapOperationError`; metadata (incl. part id) is recorded, bytes stay on the server |
