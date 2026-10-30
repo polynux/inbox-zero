@@ -45,15 +45,19 @@ export async function pollImapAccount(
       const uidNext =
         mailbox.uidNext === undefined ? 0 : Number(mailbox.uidNext);
 
-      if (uidNext <= lastSeenUid) {
+      if (uidNext <= lastSeenUid + 1) {
         // No new messages
         return { newMessages: 0 };
       }
 
-      // Search for messages with UID > lastSeenUid
-      const newUids = await searchImapMessages(client, {
-        uid: `${lastSeenUid + 1}:*`,
-      });
+      // Search for messages with UID > lastSeenUid. RFC 3501: `UID n:*` also
+      // matches the highest existing UID when n is above it, so drop anything
+      // below the cursor instead of trusting the search result.
+      const newUids = (
+        await searchImapMessages(client, {
+          uid: `${lastSeenUid + 1}:*`,
+        })
+      ).filter((uid) => uid > lastSeenUid);
 
       if (newUids.length === 0) {
         return { newMessages: 0 };
@@ -64,8 +68,11 @@ export async function pollImapAccount(
         count: newUids.length,
       });
 
-      // Update lastSeenUid to the highest UID
-      const highestUid = Math.max(...newUids);
+      // Update lastSeenUid to the highest UID, never below the stored one.
+      const highestUid = newUids.reduce(
+        (highest, uid) => (uid > highest ? uid : highest),
+        lastSeenUid,
+      );
       await prisma.imapCredential.update({
         where: { id: credential.id },
         data: {

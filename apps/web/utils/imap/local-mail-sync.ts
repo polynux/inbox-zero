@@ -83,6 +83,7 @@ export async function getImapMailboxSyncPage(
           after: input.after,
           limit: input.limit,
           uidValidity,
+          uidNext,
           emailAccountId: input.emailAccountId,
         });
       return getImapDeltaPage(client, {
@@ -102,6 +103,7 @@ export async function getImapMailboxSyncPage(
       after: input.after,
       limit: input.limit,
       uidValidity,
+      uidNext,
       emailAccountId: input.emailAccountId,
     });
   });
@@ -118,7 +120,7 @@ async function getImapDeltaPage(
     emailAccountId: string;
   },
 ): Promise<MailboxSyncPage> {
-  if (options.uidNext <= options.lastUid) {
+  if (options.uidNext <= options.lastUid + 1) {
     return {
       cursor: encodeImapCursor(
         options.emailAccountId,
@@ -135,14 +137,22 @@ async function getImapDeltaPage(
 
   // searchImapMessages returns newest-first; page oldest-first so the cursor
   // always advances past everything returned (no gaps, no duplicates).
+  // RFC 3501: `UID n:*` also matches the highest existing UID when n is above
+  // it, so an idle mailbox re-reports its newest message; drop anything the
+  // cursor already covered instead of trusting the search result.
   const newUids = (
     await searchImapMessages(client, {
       uid: `${options.lastUid + 1}:*`,
     })
-  ).reverse();
+  )
+    .filter((uid) => uid > options.lastUid)
+    .reverse();
   const pageUids = newUids.slice(0, options.limit);
   const messages = await fetchMessagesByUids(client, pageUids);
-  const maxUid = pageUids.length > 0 ? Math.max(...pageUids) : options.lastUid;
+  const maxUid = pageUids.reduce(
+    (highest, uid) => (uid > highest ? uid : highest),
+    options.lastUid,
+  );
 
   return {
     cursor: encodeImapCursor(
@@ -165,6 +175,7 @@ async function getImapSnapshotPage(
     after?: Date;
     limit: number;
     uidValidity: number | undefined;
+    uidNext: number;
     emailAccountId: string;
   },
 ): Promise<MailboxSyncPage> {
@@ -174,7 +185,12 @@ async function getImapSnapshotPage(
   const allUids = (await searchImapMessages(client, criteria)).reverse();
   const pageUids = allUids.slice(0, options.limit);
   const messages = await fetchMessagesByUids(client, pageUids);
-  const maxUid = pageUids.length > 0 ? Math.max(...pageUids) : 0;
+  // An empty window still has to advance the cursor past everything that
+  // already exists, otherwise the next delta lists the whole mailbox.
+  const maxUid =
+    pageUids.length > 0
+      ? pageUids.reduce((highest, uid) => (uid > highest ? uid : highest), 0)
+      : Math.max(options.uidNext - 1, 0);
   return {
     cursor: encodeImapCursor(
       options.emailAccountId,

@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { decodeMailboxSyncCursor } from "@/utils/email/mailbox-sync";
+import {
+  decodeMailboxSyncCursor,
+  encodeMailboxSyncCursor,
+} from "@/utils/email/mailbox-sync";
 import { getImapMailboxSyncPage } from "@/utils/imap/local-mail-sync";
 
 vi.mock("@/utils/imap/client", () => ({
@@ -8,6 +11,8 @@ vi.mock("@/utils/imap/client", () => ({
       fn(stubClient),
   ),
 }));
+
+const MESSAGE_DATE = new Date("2026-01-01T00:00:00Z");
 
 let mailboxUids: number[];
 let uidValidity: number | undefined;
@@ -21,7 +26,12 @@ const stubClient = {
   search: vi.fn(async (criteria: Record<string, unknown>) => {
     if (typeof criteria.uid === "string") {
       const from = Number(criteria.uid.split(":")[0]);
-      return mailboxUids.filter((uid) => uid >= from);
+      const matched = mailboxUids.filter((uid) => uid >= from);
+      // RFC 3501: `n:*` matches the highest UID even when n is above it.
+      return matched.length > 0 ? matched : mailboxUids.slice(-1);
+    }
+    if (criteria.since instanceof Date) {
+      return MESSAGE_DATE >= criteria.since ? [...mailboxUids] : [];
     }
     return [...mailboxUids];
   }),
@@ -34,7 +44,7 @@ const stubClient = {
         from: [{ name: "Sender", address: "sender@example.com" }],
         to: [{ name: "Me", address: "me@example.com" }],
         subject: `Subject ${uid}`,
-        date: new Date("2026-01-01T00:00:00Z"),
+        date: MESSAGE_DATE,
         messageId: `<${uid}@example.com>`,
       },
       flags: new Set(["\\Seen"]),
@@ -63,6 +73,19 @@ const baseInput = {
 function lastUidOf(cursor: string): number {
   const decoded = decodeMailboxSyncCursor(cursor, "imap");
   return decoded.state.lastUid;
+}
+
+function cursorAt(lastUid: number): string {
+  return encodeMailboxSyncCursor({
+    version: 1,
+    provider: "imap",
+    state: {
+      emailAccountId: "account-1",
+      folder: "INBOX",
+      uidValidity,
+      lastUid,
+    },
+  });
 }
 
 beforeEach(() => {
@@ -141,5 +164,55 @@ describe("getImapMailboxSyncPage", () => {
         folderId: "Archive",
       }),
     ).rejects.toThrow();
+  });
+
+  it("returns only UIDs above the cursor", async () => {
+    const page = await getImapMailboxSyncPage({
+      ...baseInput,
+      cursor: cursorAt(3),
+    });
+
+    expect(page.reset).toBe(false);
+    expect(page.upsertedMessages.map((m) => m.id)).toEqual(["4", "5"]);
+    expect(page.hasMore).toBe(false);
+    expect(lastUidOf(page.cursor)).toBe(5);
+  });
+
+  it("reports nothing for an idle mailbox instead of its newest message", async () => {
+    const page = await getImapMailboxSyncPage({
+      ...baseInput,
+      cursor: cursorAt(5),
+    });
+
+    expect(page.upsertedMessages).toEqual([]);
+    expect(page.hasMore).toBe(false);
+    expect(lastUidOf(page.cursor)).toBe(5);
+  });
+
+  it("never moves the cursor backward", async () => {
+    const page = await getImapMailboxSyncPage({
+      ...baseInput,
+      cursor: cursorAt(10),
+    });
+
+    expect(page.upsertedMessages).toEqual([]);
+    expect(lastUidOf(page.cursor)).toBe(10);
+  });
+
+  it("does not replay the mailbox when the initial window is empty", async () => {
+    const page = await getImapMailboxSyncPage({
+      ...baseInput,
+      after: new Date("2026-06-01T00:00:00Z"),
+    });
+
+    expect(page.upsertedMessages).toEqual([]);
+    expect(lastUidOf(page.cursor)).toBe(5);
+
+    const next = await getImapMailboxSyncPage({
+      ...baseInput,
+      cursor: page.cursor,
+    });
+    expect(next.upsertedMessages).toEqual([]);
+    expect(next.hasMore).toBe(false);
   });
 });
