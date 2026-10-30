@@ -11,7 +11,7 @@ vi.mock("@/utils/imap/client", () => ({
   ): Promise<T> => fn(connection.client as never),
 }));
 
-type FakeMessage = { uid: number; date: string };
+type FakeMessage = { uid: number; date: string; from?: string; to?: string };
 
 type FakeMailbox = {
   path: string;
@@ -34,8 +34,13 @@ const config = {
   username: "me",
 };
 
-function message(uid: number, date: string): FakeMessage {
-  return { uid, date };
+function message(
+  uid: number,
+  date: string,
+  from?: string,
+  to?: string,
+): FakeMessage {
+  return { uid, date, from, to };
 }
 
 function createFakeClient(mailboxes: FakeMailbox[]) {
@@ -43,6 +48,8 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
   let current = mailboxes[0];
   const fetchedUids: number[] = [];
   const fetchQueries: Array<Record<string, unknown> | undefined> = [];
+  const sequenceOf = (message: FakeMessage) =>
+    current.messages.indexOf(message) + 1;
 
   function fetched(message: FakeMessage) {
     return {
@@ -50,8 +57,8 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       envelope: {
         date: new Date(message.date),
         subject: `message ${message.uid}`,
-        from: [{ address: `${message.uid}@example.com` }],
-        to: [],
+        from: [{ address: message.from ?? `${message.uid}@example.com` }],
+        to: message.to ? [{ address: message.to }] : [],
       },
       flags: new Set<string>(),
     };
@@ -79,12 +86,15 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
         criteria: Record<string, unknown>,
         options?: { uid?: boolean },
       ) => {
-        if (options?.uid) return current.messages.map((item) => item.uid);
-        const sequence =
-          current.messages.findIndex(
+        if (criteria.uid !== undefined) {
+          const match = current.messages.find(
             (item) => item.uid === Number(criteria.uid),
-          ) + 1;
-        return sequence > 0 ? [sequence] : [];
+          );
+          if (!match) return [];
+          // imapflow returns UIDs when uid:true, sequence numbers otherwise
+          return options?.uid === false ? [sequenceOf(match)] : [match.uid];
+        }
+        return current.messages.map((item) => item.uid);
       },
     ),
     fetchOne: vi.fn(async (sequence: string) => {
@@ -460,5 +470,125 @@ describe("ImapProvider.forwardEmail", () => {
     } finally {
       sendSpy.mockRestore();
     }
+  });
+});
+
+describe("ImapProvider sender bulk actions", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("archives only the exact sender address, not substrings", async () => {
+    const moved: Array<{ uid: number; folder: string }> = [];
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "ann@x.com"),
+          message(2, "2026-01-02", "joann@x.com"),
+          message(3, "2026-01-03", "Ann <ann@x.com>"),
+        ],
+      },
+      { path: "Archive", messages: [] },
+    ]);
+    fake.client.messageMove = vi.fn(async (uid: string, folder: string) => {
+      moved.push({ uid: Number(uid), folder });
+    });
+    // SEARCH {from} returns candidate UIDs (substring match, like a server);
+    // UID->sequence lookups resolve against the real mailbox contents.
+    fake.client.search = vi.fn(
+      async (
+        criteria: Record<string, unknown>,
+        options?: { uid?: boolean },
+      ) => {
+        if (criteria.uid !== undefined) {
+          const index = [1, 2, 3].indexOf(Number(criteria.uid)) + 1;
+          return index > 0 ? [index] : [];
+        }
+        return [1, 2, 3];
+      },
+    );
+    connection.client = fake.client;
+
+    await new ImapProvider(config).bulkArchiveFromSenders(
+      ["ann@x.com"],
+      "owner@example.com",
+      "account-1",
+    );
+
+    expect(moved.map((m) => m.uid).sort()).toEqual([1, 3]);
+  });
+
+  it("counts only exact from-address matches", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "ann@x.com"),
+          message(2, "2026-01-02", "joann@x.com"),
+        ],
+      },
+    ]);
+    fake.client.search = vi.fn(
+      async (
+        criteria: Record<string, unknown>,
+        options?: { uid?: boolean },
+      ) => {
+        if (criteria.uid !== undefined) {
+          const index = [1, 2].indexOf(Number(criteria.uid)) + 1;
+          return index > 0 ? [index] : [];
+        }
+        return [1, 2];
+      },
+    );
+    connection.client = fake.client;
+
+    const count = await new ImapProvider(config).countReceivedMessages(
+      "ann@x.com",
+      10,
+    );
+
+    expect(count).toBe(1);
+  });
+
+  it("does not treat a substring recipient hit as a sent reply", async () => {
+    const fake = createFakeClient([
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [message(9, "2026-01-01", "me@example.com", "joann@x.com")],
+      },
+    ]);
+    fake.client.search = vi.fn(
+      async (
+        criteria: Record<string, unknown>,
+        options?: { uid?: boolean },
+      ) => {
+        if (criteria.uid !== undefined) {
+          return Number(criteria.uid) === 9 ? [1] : [];
+        }
+        return [9];
+      },
+    );
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).checkIfReplySent("ann@x.com"),
+    ).resolves.toBe(false);
+  });
+
+  it("does not match an account address that merely contains the sender", async () => {
+    const provider = new ImapProvider({
+      ...config,
+      email: "joann@x.com",
+    });
+    expect(
+      provider.isSentMessage({ headers: { from: "ann@x.com" } } as never),
+    ).toBe(false);
+    expect(
+      provider.isSentMessage({
+        headers: { from: "Me <joann@x.com>" },
+      } as never),
+    ).toBe(true);
   });
 });

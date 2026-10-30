@@ -55,6 +55,7 @@ import { saveDraft } from "@/utils/imap/draft";
 import { sendSmtpEmail } from "@/utils/imap/mail";
 import { buildThreadId } from "@/utils/imap/thread";
 import { SafeError } from "@/utils/error";
+import { extractEmailAddress, splitRecipientList } from "@/utils/email";
 import { createScopedLogger } from "@/utils/logger";
 import { escapeHtml, textToHtmlParagraphs } from "@/utils/string";
 
@@ -693,7 +694,13 @@ export class ImapProvider implements EmailProvider {
       const archiveFolder = await findArchiveFolder(client);
 
       for (const email of fromEmails) {
-        const uids = await searchImapMessages(client, { from: email });
+        const candidates = await searchImapMessages(client, { from: email });
+        const uids = await filterUidsByExactAddress(
+          client,
+          candidates,
+          "from",
+          email,
+        );
         for (const uid of uids) {
           await moveMessageToFolder(client, uid, archiveFolder);
         }
@@ -712,7 +719,13 @@ export class ImapProvider implements EmailProvider {
       if (!trashFolder) return;
 
       for (const email of fromEmails) {
-        const uids = await searchImapMessages(client, { from: email });
+        const candidates = await searchImapMessages(client, { from: email });
+        const uids = await filterUidsByExactAddress(
+          client,
+          candidates,
+          "from",
+          email,
+        );
         for (const uid of uids) {
           await moveMessageToFolder(client, uid, trashFolder);
         }
@@ -774,13 +787,18 @@ export class ImapProvider implements EmailProvider {
     const filtered = messages.filter((m) => {
       if (
         options.excludeToEmails?.some((e) =>
-          m.headers.to.toLowerCase().includes(e.toLowerCase()),
+          splitRecipientList(m.headers.to).some(
+            (entry) =>
+              extractEmailAddress(entry).toLowerCase() === e.toLowerCase(),
+          ),
         )
       )
         return false;
       if (
-        options.excludeFromEmails?.some((e) =>
-          m.headers.from.toLowerCase().includes(e.toLowerCase()),
+        options.excludeFromEmails?.some(
+          (e) =>
+            extractEmailAddress(m.headers.from).toLowerCase() ===
+            e.toLowerCase(),
         )
       )
         return false;
@@ -1094,7 +1112,17 @@ ${messageContent}
       const sentFolder = await findSentFolder(client);
       if (!sentFolder) return false;
       await client.mailboxOpen(sentFolder, { readOnly: true });
-      const uids = await searchImapMessages(client, { to: senderEmail }, 1);
+      const candidates = await searchImapMessages(
+        client,
+        { to: senderEmail },
+        1,
+      );
+      const uids = await filterUidsByExactAddress(
+        client,
+        candidates,
+        "to",
+        senderEmail,
+      );
       return uids.length > 0;
     });
   }
@@ -1105,10 +1133,16 @@ ${messageContent}
   ): Promise<number> {
     return this.withConnection(async (client) => {
       await client.mailboxOpen("INBOX", { readOnly: true });
-      const uids = await searchImapMessages(
+      const candidates = await searchImapMessages(
         client,
         { from: senderEmail },
         threshold,
+      );
+      const uids = await filterUidsByExactAddress(
+        client,
+        candidates,
+        "from",
+        senderEmail,
       );
       return uids.length;
     });
@@ -1125,19 +1159,28 @@ ${messageContent}
       await client.mailboxOpen(sentFolder, { readOnly: true });
 
       // Check if we've sent to this address before
-      const email = options.from.match(/<([^>]+)>/)?.[1] || options.from;
-      const uids = await searchImapMessages(
+      const email =
+        extractEmailAddress(options.from) ||
+        options.from.match(/<([^>]+)>/)?.[1] ||
+        options.from;
+      const candidates = await searchImapMessages(
         client,
         { to: email, before: options.date },
         1,
+      );
+      const uids = await filterUidsByExactAddress(
+        client,
+        candidates,
+        "to",
+        email,
       );
       return uids.length > 0;
     });
   }
 
   isSentMessage(message: ParsedMessage): boolean {
-    const from = message.headers.from.toLowerCase();
-    return from.includes(this.config.email.toLowerCase());
+    const from = extractEmailAddress(message.headers.from).toLowerCase();
+    return from.length > 0 && from === this.config.email.toLowerCase();
   }
 
   isReplyInThread(message: ParsedMessage): boolean {
@@ -1293,7 +1336,13 @@ ${messageContent}
     return this.withConnection(async (client) => {
       await client.mailboxOpen("INBOX");
       const archiveFolder = await findArchiveFolder(client);
-      const uids = await searchImapMessages(client, { from: fromEmail });
+      const candidates = await searchImapMessages(client, { from: fromEmail });
+      const uids = await filterUidsByExactAddress(
+        client,
+        candidates,
+        "from",
+        fromEmail,
+      );
       for (const uid of uids) {
         await moveMessageToFolder(client, uid, archiveFolder);
       }
@@ -1606,4 +1655,28 @@ async function assertDeletableFolder(
     throw new SafeError(
       `Special-use mailbox ${mailbox.specialUse} cannot be deleted`,
     );
+}
+
+/**
+ * IMAP FROM/TO SEARCH is substring-based: `ann@x.com` also matches
+ * `joann@x.com`. Fetch the candidates and keep only messages whose
+ * envelope address equals the target (case-insensitive).
+ */
+async function filterUidsByExactAddress(
+  client: ImapFlow,
+  uids: number[],
+  header: "from" | "to",
+  email: string,
+): Promise<number[]> {
+  const target = email.toLowerCase();
+  const messages = await fetchMessagesByUids(client, uids);
+  return messages
+    .filter((message) => {
+      const headerValue =
+        header === "from" ? message.headers.from : message.headers.to;
+      return splitRecipientList(headerValue).some(
+        (entry) => extractEmailAddress(entry).toLowerCase() === target,
+      );
+    })
+    .map((message) => Number(message.id));
 }
