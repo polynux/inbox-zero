@@ -38,16 +38,17 @@ export async function withImapConnection<T>(
   fn: (client: ImapFlow) => Promise<T>,
 ): Promise<T> {
   const client = createImapConnection(config);
+  let connectTimer: ReturnType<typeof setTimeout> | undefined;
 
   try {
     await Promise.race([
       client.connect(),
-      new Promise<never>((_, reject) =>
-        setTimeout(
+      new Promise<never>((_, reject) => {
+        connectTimer = setTimeout(
           () => reject(new Error("IMAP connection timeout")),
           CONNECT_TIMEOUT_MS,
-        ),
-      ),
+        );
+      }),
     ]);
 
     return await fn(client);
@@ -58,6 +59,7 @@ export async function withImapConnection<T>(
     });
     throw error;
   } finally {
+    clearTimeout(connectTimer);
     try {
       await client.logout();
     } catch {
