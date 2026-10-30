@@ -11,8 +11,15 @@ vi.mock("@/utils/imap/folder", () => ({
 function createClient() {
   const append = vi.fn(async () => ({ uid: 42, uidValidity: 1 }));
   const mailboxCreate = vi.fn(async () => undefined);
-  const client = { append, mailboxCreate } as unknown as ImapFlow;
-  return { client, append, mailboxCreate };
+  const mailboxOpen = vi.fn(async () => ({}));
+  const search = vi.fn(async () => [] as number[]);
+  const client = {
+    append,
+    mailboxCreate,
+    mailboxOpen,
+    search,
+  } as unknown as ImapFlow;
+  return { client, append, mailboxCreate, mailboxOpen, search };
 }
 
 function appendedHeaderLines(append: {
@@ -26,9 +33,10 @@ describe("saveDraft", () => {
   let client: ImapFlow;
   let append: ReturnType<typeof createClient>["append"];
   let mailboxCreate: ReturnType<typeof createClient>["mailboxCreate"];
+  let search: ReturnType<typeof createClient>["search"];
 
   beforeEach(() => {
-    ({ client, append, mailboxCreate } = createClient());
+    ({ client, append, mailboxCreate, search } = createClient());
     vi.mocked(findDraftsFolder).mockResolvedValue("Drafts");
   });
 
@@ -102,6 +110,23 @@ describe("saveDraft", () => {
       }),
     ).rejects.toThrow("No Drafts folder found");
     expect(append).not.toHaveBeenCalled();
+  });
+
+  it("recovers the APPENDed UID by Message-ID when the server returns none", async () => {
+    append.mockResolvedValueOnce({ uidValidity: 123 });
+    search.mockImplementationOnce(async () => [77]);
+
+    const id = await saveDraft(client, {
+      from: "me@example.com",
+      to: "to@example.com",
+      subject: "Hello",
+      text: "body",
+    });
+
+    const raw = String(append.mock.calls[0][1]);
+    expect(raw).toMatch(/^Message-ID: <[^>]+@inbox-zero\.local>$/m);
+    expect(search).toHaveBeenCalledOnce();
+    expect(id).toBe(encodeImapMessageId("Drafts", 77));
   });
 
   it("throws a clear error when APPEND returns no UID (no UIDPLUS)", async () => {

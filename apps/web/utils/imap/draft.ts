@@ -1,4 +1,6 @@
 import type { ImapFlow } from "imapflow";
+import { randomUUID } from "node:crypto";
+import { searchImapMessages } from "@/utils/imap/message";
 import { findDraftsFolder } from "@/utils/imap/folder";
 import { encodeImapMessageId } from "@/utils/imap/message-id";
 export async function saveDraft(
@@ -31,11 +33,16 @@ export async function saveDraft(
     }
   }
 
+  // Secure, unique Message-ID: it lets a server without UIDPLUS be searched
+  // for the draft this APPEND just created.
+  const messageId = `<${randomUUID()}@inbox-zero.local>`;
+
   const messageParts: string[] = [
     `From: ${stripHeaderBreaks(options.from)}`,
     `To: ${stripHeaderBreaks(options.to)}`,
     `Subject: ${stripHeaderBreaks(options.subject)}`,
     `Date: ${new Date().toUTCString()}`,
+    `Message-ID: ${messageId}`,
     "MIME-Version: 1.0",
   ];
 
@@ -66,14 +73,27 @@ export async function saveDraft(
   );
 
   if (!result) throw new Error("Failed to save draft: APPEND rejected");
-  // APPEND without UIDPLUS reports no UID: the draft exists but its id is
-  // unknowable, so fail loudly instead of returning a UIDVALIDITY-shaped
-  // or "unknown" id that later acts on the wrong message.
-  if (!result.uid)
+  // APPEND without UIDPLUS reports no UID. The draft exists, so recover its
+  // UID by searching the Message-ID written above; failing that, throw
+  // instead of returning a fabricated id (a retry would duplicate the draft).
+  let uid = result.uid;
+  if (!uid) {
+    try {
+      await client.mailboxOpen(draftsFolder, { readOnly: true });
+      [uid] = await searchImapMessages(
+        client,
+        { header: { "Message-ID": messageId } },
+        1,
+      );
+    } catch {
+      // Fall through to the explicit error below.
+    }
+  }
+  if (!uid)
     throw new Error(
       "Failed to save draft: server did not return a UID (no UIDPLUS support)",
     );
-  return encodeImapMessageId(draftsFolder, result.uid);
+  return encodeImapMessageId(draftsFolder, uid);
 }
 
 // A raw CR, LF or NUL in a header value would start a new header line.
