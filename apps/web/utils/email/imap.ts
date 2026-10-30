@@ -582,6 +582,7 @@ export class ImapProvider implements EmailProvider {
     return this.withConnection(async (client) => {
       await client.mailboxOpen("INBOX");
       const trashFolder = await findTrashFolder(client);
+      if (!trashFolder) return;
       for (const msg of messages) {
         try {
           await moveMessageToFolder(client, Number(msg.id), trashFolder);
@@ -680,6 +681,7 @@ export class ImapProvider implements EmailProvider {
     return this.withConnection(async (client) => {
       await client.mailboxOpen("INBOX");
       const trashFolder = await findTrashFolder(client);
+      if (!trashFolder) return;
 
       for (const email of fromEmails) {
         const uids = await searchImapMessages(client, { from: email });
@@ -695,6 +697,7 @@ export class ImapProvider implements EmailProvider {
   async getSentMessages(maxResults?: number): Promise<ParsedMessage[]> {
     return this.withConnection(async (client) => {
       const sentFolder = await findSentFolder(client);
+      if (!sentFolder) return [];
       await client.mailboxOpen(sentFolder, { readOnly: true });
       const uids = await searchImapMessages(
         client,
@@ -713,6 +716,7 @@ export class ImapProvider implements EmailProvider {
   }): Promise<SentMessagePage> {
     return this.withConnection(async (client) => {
       const sentFolder = await findSentFolder(client);
+      if (!sentFolder) return { messages: [] };
       await client.mailboxOpen(sentFolder, { readOnly: true });
 
       const criteria: Record<string, unknown> = { all: true };
@@ -1053,6 +1057,7 @@ ${email.textHtml || email.textPlain || ""}
   async checkIfReplySent(senderEmail: string): Promise<boolean> {
     return this.withConnection(async (client) => {
       const sentFolder = await findSentFolder(client);
+      if (!sentFolder) return false;
       await client.mailboxOpen(sentFolder, { readOnly: true });
       const uids = await searchImapMessages(client, { to: senderEmail }, 1);
       return uids.length > 0;
@@ -1081,6 +1086,7 @@ ${email.textHtml || email.textPlain || ""}
   }): Promise<boolean> {
     return this.withConnection(async (client) => {
       const sentFolder = await findSentFolder(client);
+      if (!sentFolder) return false;
       await client.mailboxOpen(sentFolder, { readOnly: true });
 
       // Check if we've sent to this address before
@@ -1140,6 +1146,7 @@ ${email.textHtml || email.textPlain || ""}
     return this.withConnection(async (client) => {
       await client.mailboxOpen("INBOX");
       const trashFolder = await findTrashFolder(client);
+      if (!trashFolder) return;
       for (const messageId of new Set(messageIds)) {
         try {
           await moveMessageToFolder(client, Number(messageId), trashFolder);
