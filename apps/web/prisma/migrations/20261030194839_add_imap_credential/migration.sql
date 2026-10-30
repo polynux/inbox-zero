@@ -18,9 +18,6 @@ CREATE TABLE "ImapCredential" (
     CONSTRAINT "ImapCredential_pkey" PRIMARY KEY ("id")
 );
 
--- AlterTable
-ALTER TABLE "User" ADD COLUMN     "password" TEXT;
-
 -- CreateIndex
 CREATE UNIQUE INDEX "ImapCredential_accountId_key" ON "ImapCredential"("accountId");
 

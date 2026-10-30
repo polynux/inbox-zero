@@ -129,6 +129,10 @@ describe("betterAuthConfig", () => {
     ).toEqual(["google", "apple"]);
   });
 
+  it("keeps password sign-up disabled", () => {
+    expect(betterAuthConfig.options.emailAndPassword?.enabled).toBe(false);
+  });
+
   describe("inline profile photos", () => {
     const userHooks = () =>
       (betterAuthConfig as any).options.databaseHooks.user;
