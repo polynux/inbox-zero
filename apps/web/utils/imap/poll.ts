@@ -41,10 +41,21 @@ export async function pollImapAccount(
         throw new Error("IMAP credential not found");
       }
 
-      const lastSeenUid = credential.lastSeenUid || 0;
       const uidNext =
         mailbox.uidNext === undefined ? 0 : Number(mailbox.uidNext);
 
+      // First poll (null cursor): baseline only, report 0 new. The whole
+      // mailbox predates linking, so reporting it all as new would archive
+      // or process years of history on first run.
+      if (credential.lastSeenUid == null) {
+        await prisma.imapCredential.update({
+          where: { id: credential.id },
+          data: { lastSeenUid: uidNext - 1, lastPolledAt: new Date() },
+        });
+        return { newMessages: 0 };
+      }
+
+      const lastSeenUid = credential.lastSeenUid;
       if (uidNext <= lastSeenUid + 1) {
         // No new messages
         return { newMessages: 0 };

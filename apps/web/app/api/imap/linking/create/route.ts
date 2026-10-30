@@ -3,6 +3,7 @@ import { env } from "@/env";
 import { withAuth } from "@/utils/middleware";
 import { imapCredentialSchema } from "@/utils/actions/imap.validation";
 import { encryptToken } from "@/utils/encryption";
+import { createImapConnection } from "@/utils/imap/client";
 import { validateImapHosts } from "@/utils/imap/host-validation";
 import { isDuplicateError } from "@/utils/prisma-helpers";
 import prisma from "@/utils/prisma";
@@ -61,6 +62,36 @@ export const POST = withAuth("imap/linking/create", async (request) => {
     );
   }
 
+  // Seed the poll cursor from the mailbox's uidNext so the first poll is a
+  // baseline (0 new). Without this the first poll would report the whole
+  // pre-link mailbox as new. A failed probe leaves lastSeenUid null and the
+  // first poll baselines instead — same 0-new outcome.
+  let lastSeenUid: number | null = null;
+  try {
+    const probe = createImapConnection({
+      email: normalizedEmail,
+      emailAccountId: "",
+      imapHost: data.imapHost,
+      imapPort: data.imapPort,
+      imapSecurity: data.imapSecurity,
+      password: data.password,
+      smtpHost: data.smtpHost,
+      smtpPort: data.smtpPort,
+      smtpSecurity: data.smtpSecurity,
+      username: data.username,
+    });
+    await probe.connect();
+    try {
+      const mailbox = await probe.mailboxOpen("INBOX", { readOnly: true });
+      lastSeenUid =
+        mailbox.uidNext === undefined ? null : Number(mailbox.uidNext) - 1;
+    } finally {
+      await probe.logout().catch(() => {});
+    }
+  } catch {
+    lastSeenUid = null;
+  }
+
   // Create Account + ImapCredential + EmailAccount in a single transaction
   try {
     const result = await prisma.account.create({
@@ -79,6 +110,7 @@ export const POST = withAuth("imap/linking/create", async (request) => {
             smtpSecurity: data.smtpSecurity,
             username: data.username,
             password: encryptedPassword,
+            ...(lastSeenUid != null ? { lastSeenUid } : {}),
           },
         },
         emailAccount: {

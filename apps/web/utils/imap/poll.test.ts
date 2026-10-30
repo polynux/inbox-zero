@@ -81,6 +81,23 @@ describe("pollImapAccount", () => {
     );
   });
 
+  it("baselines a null cursor: first poll reports 0 new", async () => {
+    mockLastSeenUid(null);
+
+    const result = await pollImapAccount("email-account-1");
+
+    expect(result).toEqual({
+      emailAccountId: "email-account-1",
+      newMessages: 0,
+    });
+    expect(prisma.imapCredential.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "credential-1" },
+        data: expect.objectContaining({ lastSeenUid: 5 }),
+      }),
+    );
+  });
+
   it("never moves the stored UID backward", async () => {
     mockLastSeenUid(10);
 

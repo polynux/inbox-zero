@@ -1,10 +1,6 @@
 import type { ImapFlow } from "imapflow";
 import { findDraftsFolder } from "@/utils/imap/folder";
-
-/**
- * Save a draft message to the IMAP Drafts folder.
- * Returns the UID of the appended message.
- */
+import { encodeImapMessageId } from "@/utils/imap/message-id";
 export async function saveDraft(
   client: ImapFlow,
   options: {
@@ -70,11 +66,14 @@ export async function saveDraft(
   );
 
   if (!result) throw new Error("Failed to save draft: APPEND rejected");
-  return result.uid
-    ? String(result.uid)
-    : result.uidValidity
-      ? String(result.uidValidity)
-      : "unknown";
+  // APPEND without UIDPLUS reports no UID: the draft exists but its id is
+  // unknowable, so fail loudly instead of returning a UIDVALIDITY-shaped
+  // or "unknown" id that later acts on the wrong message.
+  if (!result.uid)
+    throw new Error(
+      "Failed to save draft: server did not return a UID (no UIDPLUS support)",
+    );
+  return encodeImapMessageId(draftsFolder, result.uid);
 }
 
 // A raw CR, LF or NUL in a header value would start a new header line.

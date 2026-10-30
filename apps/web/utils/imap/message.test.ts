@@ -204,4 +204,32 @@ describe("convertImapMessage label ids", () => {
     );
     expect(parsed?.labelIds).toContain("$MailFlagBit0");
   });
+
+  it("does not read 'Presentations' as SENT", async () => {
+    const parsed = await convertImapMessage(
+      { ...baseMessage } as never,
+      undefined,
+      "Presentations",
+    );
+    expect(parsed?.labelIds).not.toContain("SENT");
+  });
+
+  it("maps special-use flags exactly (no substring matching)", async () => {
+    const sent = await convertImapMessage(
+      { ...baseMessage } as never,
+      undefined,
+      "Some Folder",
+      "\\Sent",
+    );
+    expect(sent?.labelIds).toContain("SENT");
+
+    const plain = await convertImapMessage(
+      { ...baseMessage } as never,
+      undefined,
+      "Some Folder",
+    );
+    expect(plain?.labelIds).not.toContain("SENT");
+    expect(plain?.labelIds).not.toContain("TRASH");
+    expect(plain?.labelIds).not.toContain("SPAM");
+  });
 });

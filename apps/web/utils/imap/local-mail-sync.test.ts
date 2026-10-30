@@ -17,12 +17,17 @@ const MESSAGE_DATE = new Date("2026-01-01T00:00:00Z");
 let mailboxUids: number[];
 let uidValidity: number | undefined;
 
-const stubClient = {
-  mailboxOpen: vi.fn(async (_folder: string, _options?: unknown) => ({
-    exists: mailboxUids.length,
-    uidNext: mailboxUids.length > 0 ? Math.max(...mailboxUids) + 1 : 1,
-    uidValidity,
-  })),
+const stubClient: { mailbox: { path?: string } } & Record<string, unknown> = {
+  mailbox: {},
+  mailboxOpen: vi.fn(async (folder: string, _options?: unknown) => {
+    stubClient.mailbox = { path: folder };
+    return {
+      path: folder,
+      exists: mailboxUids.length,
+      uidNext: mailboxUids.length > 0 ? Math.max(...mailboxUids) + 1 : 1,
+      uidValidity,
+    };
+  }),
   search: vi.fn(async (criteria: Record<string, unknown>) => {
     if (typeof criteria.uid === "string") {
       const from = Number(criteria.uid.split(":")[0]);
@@ -70,6 +75,10 @@ const baseInput = {
   limit: 2,
 };
 
+function qualifiedId(uid: number): string {
+  return `${uid}@${Buffer.from("INBOX", "utf8").toString("base64url")}`;
+}
+
 function lastUidOf(cursor: string): number {
   const decoded = decodeMailboxSyncCursor(cursor, "imap");
   return decoded.state.lastUid;
@@ -103,7 +112,10 @@ describe("getImapMailboxSyncPage", () => {
 
     expect(page.reset).toBe(true);
     expect(page.hasMore).toBe(true);
-    expect(page.upsertedMessages.map((m) => m.id)).toEqual(["1", "2"]);
+    expect(page.upsertedMessages.map((m) => m.id)).toEqual([
+      qualifiedId(1),
+      qualifiedId(2),
+    ]);
     expect(lastUidOf(page.cursor)).toBe(2);
   });
 
@@ -123,7 +135,13 @@ describe("getImapMailboxSyncPage", () => {
       if (!page.hasMore) break;
     }
 
-    expect(seen).toEqual(["1", "2", "3", "4", "5"]);
+    expect(seen).toEqual([
+      qualifiedId(1),
+      qualifiedId(2),
+      qualifiedId(3),
+      qualifiedId(4),
+      qualifiedId(5),
+    ]);
     expect(resetCount).toBe(1);
     expect(cursor).toBeDefined();
     const drained = await getImapMailboxSyncPage({
@@ -148,7 +166,10 @@ describe("getImapMailboxSyncPage", () => {
       cursor: first.cursor,
     });
     expect(page.reset).toBe(true);
-    expect(page.upsertedMessages.map((m) => m.id)).toEqual(["1", "2"]);
+    expect(page.upsertedMessages.map((m) => m.id)).toEqual([
+      qualifiedId(1),
+      qualifiedId(2),
+    ]);
   });
 
   it("rejects cursors from another account or folder", async () => {
@@ -173,7 +194,10 @@ describe("getImapMailboxSyncPage", () => {
     });
 
     expect(page.reset).toBe(false);
-    expect(page.upsertedMessages.map((m) => m.id)).toEqual(["4", "5"]);
+    expect(page.upsertedMessages.map((m) => m.id)).toEqual([
+      qualifiedId(4),
+      qualifiedId(5),
+    ]);
     expect(page.hasMore).toBe(false);
     expect(lastUidOf(page.cursor)).toBe(5);
   });

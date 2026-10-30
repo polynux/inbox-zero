@@ -6,6 +6,7 @@ import type {
 } from "imapflow";
 import { simpleParser } from "mailparser";
 import type { ParsedMessage, ParsedMessageHeaders } from "@/utils/types";
+import { encodeImapMessageId } from "@/utils/imap/message-id";
 import { buildThreadId } from "@/utils/imap/thread";
 
 // Gmail-style system label ids that downstream consumers (sync observations,
@@ -37,7 +38,12 @@ export async function fetchMessageBySeq(
   if (!msg) return null;
 
   const body = await downloadMessageBody(client, seq);
-  return convertImapMessage(msg, body, client.mailbox?.path);
+  return convertImapMessage(
+    msg,
+    body,
+    client.mailbox?.path,
+    client.mailbox?.specialUse,
+  );
 }
 
 /**
@@ -64,7 +70,12 @@ export async function fetchMessageByUid(
     if (!msg) return null;
 
     const body = await downloadMessageBody(client, seq);
-    return convertImapMessage(msg, body, client.mailbox?.path);
+    return convertImapMessage(
+      msg,
+      body,
+      client.mailbox?.path,
+      client.mailbox?.specialUse,
+    );
   } catch {
     return null;
   }
@@ -92,7 +103,12 @@ export async function fetchRecentMessages(
     flags: true,
     bodyStructure: true,
   })) {
-    const parsed = await convertImapMessage(msg, undefined, mailbox.path);
+    const parsed = await convertImapMessage(
+      msg,
+      undefined,
+      mailbox.path,
+      mailbox.specialUse,
+    );
     if (parsed) messages.push(parsed);
   }
 
@@ -109,6 +125,7 @@ export async function fetchRecentMessages(
 export async function fetchMessagesByUids(
   client: ImapFlow,
   uids: number[],
+  log?: { warn: (message: string, context?: Record<string, unknown>) => void },
 ): Promise<ParsedMessage[]> {
   if (uids.length === 0) return [];
 
@@ -135,11 +152,18 @@ export async function fetchMessagesByUids(
           msg,
           undefined,
           client.mailbox?.path,
+          client.mailbox?.specialUse,
         );
         if (parsed) messages.push(parsed);
       }
-    } catch {
-      // Skip messages that fail to fetch
+    } catch (error) {
+      // Skip messages that fail to fetch, but log at warn (not silently):
+      // callers move/flag the returned set, so a silent drop reads as done.
+      log?.warn("IMAP fetch by UID failed", {
+        folder: client.mailbox?.path,
+        uid,
+        error,
+      });
     }
   }
 
@@ -206,6 +230,7 @@ export async function convertImapMessage(
   msg: FetchMessageObject,
   body?: { textHtml?: string; textPlain?: string; references?: string },
   folderPath?: string,
+  specialUse?: string,
 ): Promise<ParsedMessage | null> {
   try {
     const envelope = msg.envelope;
@@ -252,7 +277,7 @@ export async function convertImapMessage(
     );
 
     const flags = msg.flags ? [...msg.flags] : [];
-    const labelIds = buildImapLabelIds({ flags, folderPath });
+    const labelIds = buildImapLabelIds({ flags, folderPath, specialUse });
 
     const headers: ParsedMessageHeaders = {
       from: fromStr,
@@ -273,9 +298,13 @@ export async function convertImapMessage(
     const { attachments, inline } = extractAttachments(msg.bodyStructure);
 
     return {
-      id: String(msg.uid),
+      id:
+        folderPath && msg.uid
+          ? encodeImapMessageId(folderPath, msg.uid)
+          : String(msg.uid),
       threadId,
-      historyId: String(msg.uid),
+      historyId:
+        folderPath && msg.uid ? `${folderPath}:${msg.uid}` : String(msg.uid),
       date,
       headers,
       subject: envelope.subject || "(no subject)",
@@ -424,6 +453,8 @@ function imapRoleLabel(
   folderPath?: string,
   specialUse?: string,
 ): string | undefined {
+  // Special-use flags are authoritative; name matching below is exact-only
+  // so user folders like "Presentations" never read as SENT.
   const use = specialUse?.toLowerCase();
   if (use === "\\trash") return IMAP_LABEL.TRASH;
   if (use === "\\junk") return IMAP_LABEL.SPAM;
@@ -434,11 +465,25 @@ function imapRoleLabel(
   const folder = folderPath?.toLowerCase();
   if (!folder) return;
   if (folder === "inbox") return IMAP_LABEL.INBOX;
-  if (folder.includes("trash") || folder.includes("deleted"))
+  // Exact well-known names only (plus the leaf segment of a hierarchy, so
+  // `Mail/Trash` still resolves but `Presentations` does not).
+  const leaf = folder.split(/[/.]/).pop() || folder;
+  if (leaf === "trash" || leaf === "deleted items" || leaf === "deleted")
     return IMAP_LABEL.TRASH;
-  if (folder.includes("junk") || folder.includes("spam"))
+  if (
+    leaf === "junk" ||
+    leaf === "spam" ||
+    leaf === "junk mail" ||
+    leaf === "junk e-mail"
+  )
     return IMAP_LABEL.SPAM;
-  if (folder.includes("sent")) return IMAP_LABEL.SENT;
-  if (folder.includes("draft")) return IMAP_LABEL.DRAFT;
+  if (
+    leaf === "sent" ||
+    leaf === "sent items" ||
+    leaf === "sent messages" ||
+    leaf === "sent mail"
+  )
+    return IMAP_LABEL.SENT;
+  if (leaf === "drafts" || leaf === "draft") return IMAP_LABEL.DRAFT;
   return;
 }

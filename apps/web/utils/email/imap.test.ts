@@ -11,7 +11,14 @@ vi.mock("@/utils/imap/client", () => ({
   ): Promise<T> => fn(connection.client as never),
 }));
 
-type FakeMessage = { uid: number; date: string; from?: string; to?: string };
+type FakeMessage = {
+  uid: number;
+  date: string;
+  from?: string;
+  to?: string;
+  messageId?: string;
+  inReplyTo?: string;
+};
 
 type FakeMailbox = {
   path: string;
@@ -39,8 +46,23 @@ function message(
   date: string,
   from?: string,
   to?: string,
+  headers?: { messageId?: string; inReplyTo?: string },
 ): FakeMessage {
-  return { uid, date, from, to };
+  return { uid, date, from, to, ...headers };
+}
+
+function qualifiedId(folder: string, uid: number): string {
+  return `${uid}@${Buffer.from(folder, "utf8").toString("base64url")}`;
+}
+
+function mailboxesOf(fake: { client: unknown }): Record<string, FakeMessage[]> {
+  const list = (
+    fake.client as {
+      __mailboxes?: Record<string, FakeMessage[]>;
+    }
+  ).__mailboxes;
+  if (!list) throw new Error("fake has no mailbox store");
+  return list;
 }
 
 function createFakeClient(mailboxes: FakeMailbox[]) {
@@ -59,6 +81,8 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
         subject: `message ${message.uid}`,
         from: [{ address: message.from ?? `${message.uid}@example.com` }],
         to: message.to ? [{ address: message.to }] : [],
+        messageId: message.messageId,
+        inReplyTo: message.inReplyTo,
       },
       flags: new Set<string>(),
     };
@@ -95,13 +119,60 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
           // imapflow returns UIDs when uid:true, sequence numbers otherwise
           return options?.uid === false ? [sequenceOf(match)] : [match.uid];
         }
+        if (criteria.header) {
+          const header = criteria.header as Record<string, string>;
+          const value = Object.values(header)[0];
+          const needle = String(value).replace(/^<|>$/g, "");
+          return current.messages
+            .filter((item) =>
+              [item.messageId, item.inReplyTo].some((id) =>
+                id?.replace(/^<|>$/g, "").includes(needle),
+              ),
+            )
+            .map((item) => item.uid);
+        }
+        if (
+          typeof criteria.from === "string" ||
+          typeof criteria.to === "string"
+        ) {
+          const field = typeof criteria.from === "string" ? "from" : "to";
+          const needle = String(criteria[field]).toLowerCase();
+          return current.messages
+            .filter((item) =>
+              (item[field] ?? "").toLowerCase().includes(needle),
+            )
+            .map((item) => item.uid);
+        }
+        if (criteria.or) {
+          const ors = criteria.or as Array<{ header: Record<string, string> }>;
+          const needles = ors.map((o) =>
+            String(Object.values(o.header)[0]).replace(/^<|>$/g, ""),
+          );
+          return current.messages
+            .filter((item) =>
+              [item.messageId, item.inReplyTo].some((id) =>
+                needles.some((n) => id?.replace(/^<|>$/g, "").includes(n)),
+              ),
+            )
+            .map((item) => item.uid);
+        }
         return current.messages.map((item) => item.uid);
       },
     ),
     fetchOne: vi.fn(async (sequence: string) => {
       const message = current.messages[Number(sequence) - 1];
+      if (!message) return null;
       fetchedUids.push(message.uid);
       return fetched(message);
+    }),
+    messageMove: vi.fn(async (uid: string, folder: string) => {
+      const index = current.messages.findIndex(
+        (item) => item.uid === Number(uid),
+      );
+      if (index < 0) return;
+      const [moved] = current.messages.splice(index, 1);
+      const target = mailboxes.find((candidate) => candidate.path === folder);
+      target?.messages.push(moved);
     }),
     fetch: vi.fn((range: string, query?: Record<string, unknown>) => {
       fetchQueries.push(query);
@@ -117,6 +188,11 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
     }),
   };
 
+  (
+    client as unknown as { __mailboxes: Record<string, FakeMessage[]> }
+  ).__mailboxes = Object.fromEntries(
+    mailboxes.map((mailbox) => [mailbox.path, mailbox.messages]),
+  );
   return {
     client: client as unknown as ImapFlow,
     opened,
@@ -143,7 +219,10 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     const result = await new ImapProvider(config).getMessagesWithPagination({});
 
     expect(fake.opened).toEqual(["INBOX"]);
-    expect(result.messages.map((m) => m.id)).toEqual(["2", "1"]);
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("INBOX", 2),
+      qualifiedId("INBOX", 1),
+    ]);
     expect(result.nextPageToken).toBeUndefined();
   });
   it("fetches bodyStructure in the simple INBOX listing", async () => {
@@ -182,7 +261,10 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     });
 
     expect(fake.opened).toEqual(["All Mail"]);
-    expect(result.messages.map((m) => m.id)).toEqual(["41", "40"]);
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("All Mail", 41),
+      qualifiedId("All Mail", 40),
+    ]);
   });
 
   it("searches every selectable mailbox and merges by date", async () => {
@@ -226,11 +308,11 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
 
     expect(fake.opened).toEqual(["INBOX", "Archive", "Sent"]);
     expect(result.messages.map((m) => m.id)).toEqual([
-      "20",
-      "11",
-      "2",
-      "10",
-      "1",
+      qualifiedId("Sent", 20),
+      qualifiedId("Archive", 11),
+      qualifiedId("INBOX", 2),
+      qualifiedId("Archive", 10),
+      qualifiedId("INBOX", 1),
     ]);
     expect(result.nextPageToken).toBeUndefined();
   });
@@ -252,7 +334,11 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       inboxOnly: false,
       maxResults: 3,
     });
-    expect(first.messages.map((m) => m.id)).toEqual(["4", "3", "2"]);
+    expect(first.messages.map((m) => m.id)).toEqual([
+      qualifiedId("INBOX", 4),
+      qualifiedId("Archive", 3),
+      qualifiedId("Archive", 2),
+    ]);
     expect(first.nextPageToken).toBe("3");
 
     const second = await new ImapProvider(config).getMessagesWithPagination({
@@ -260,7 +346,7 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       maxResults: 3,
       pageToken: first.nextPageToken,
     });
-    expect(second.messages.map((m) => m.id)).toEqual(["1"]);
+    expect(second.messages.map((m) => m.id)).toEqual([qualifiedId("INBOX", 1)]);
     expect(second.nextPageToken).toBeUndefined();
   });
 });
@@ -281,8 +367,13 @@ describe("ImapProvider drafts without a Drafts mailbox", () => {
 
     const provider = new ImapProvider(config);
     await expect(provider.getDrafts()).resolves.toEqual([]);
-    await expect(provider.getDraft("1")).resolves.toBeNull();
-    await expect(provider.deleteDraft("1")).resolves.toBe(false);
+    // Bare UIDs are not valid ids: getDraft/deleteDraft reject before I/O.
+    await expect(provider.getDraft("1")).rejects.toThrow(/folder-qualified/);
+    await expect(provider.deleteDraft("1")).rejects.toThrow(/folder-qualified/);
+    // A qualified id naming a folder the server does not list misses cleanly.
+    const missing = qualifiedId("Drafts", 7);
+    await expect(provider.getDraft(missing)).resolves.toBeNull();
+    await expect(provider.deleteDraft(missing)).resolves.toBe(false);
     expect(fake.opened).toEqual([]);
   });
 });
@@ -298,12 +389,13 @@ describe("ImapProvider draft id validation", () => {
     "-3",
     "abc",
     "",
+    "1",
   ])("rejects getDraft(%s) without touching the server", async (draftId) => {
     const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
     connection.client = fake.client;
 
     await expect(new ImapProvider(config).getDraft(draftId)).rejects.toThrow(
-      "positive integer",
+      /folder-qualified/,
     );
     expect(fake.opened).toEqual([]);
   });
@@ -312,14 +404,41 @@ describe("ImapProvider draft id validation", () => {
     "1:*",
     "0",
     "nope",
+    "1",
   ])("rejects deleteDraft(%s) without touching the server", async (draftId) => {
     const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
     connection.client = fake.client;
 
     await expect(new ImapProvider(config).deleteDraft(draftId)).rejects.toThrow(
-      "positive integer",
+      /folder-qualified/,
     );
     expect(fake.opened).toEqual([]);
+  });
+
+  it("ignores a draft id naming another folder without acting on it", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [message(7, "2026-01-01")],
+      },
+      { path: "Drafts", messages: [] },
+    ]);
+    const deleted: Array<{ uid: number; folder: string }> = [];
+    fake.client.messageDelete = vi.fn(async (uid: string) => {
+      deleted.push({ uid: Number(uid), folder: fake.opened.at(-1) || "" });
+    });
+    connection.client = fake.client;
+
+    // Id names INBOX, but drafts live in Drafts: miss cleanly, no delete.
+    await expect(
+      new ImapProvider(config).deleteDraft(qualifiedId("INBOX", 7)),
+    ).resolves.toBe(false);
+    expect(deleted).toEqual([]);
+    expect(fake.opened).toEqual([]);
+    // Same for getDraft: resolves null without opening anything.
+    await expect(
+      new ImapProvider(config).getDraft(qualifiedId("INBOX", 7)),
+    ).resolves.toBeNull();
   });
 });
 
@@ -584,13 +703,35 @@ describe("ImapProvider unknown threads", () => {
     connection.client = null;
   });
 
-  it("archiveThread throws instead of silently succeeding", async () => {
+  it("getThreadMessages throws for an unknown thread", async () => {
+    const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).getThreadMessages("no-such-thread"),
+    ).rejects.toThrow(/not found/i);
+  });
+
+  it("archiveThread treats a vanished thread as a no-op (Gmail: 404 success)", async () => {
     const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
     connection.client = fake.client;
 
     await expect(
       new ImapProvider(config).archiveThread("no-such-thread", "owner@x.com"),
-    ).rejects.toThrow(/not found/i);
+    ).resolves.toBeUndefined();
+  });
+
+  it("trashThread treats a vanished thread as a no-op (Gmail: 200 success)", async () => {
+    const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).trashThread(
+        "no-such-thread",
+        "owner@x.com",
+        "automation",
+      ),
+    ).resolves.toBeUndefined();
   });
 });
 
@@ -610,29 +751,40 @@ describe("ImapProvider restore paths", () => {
     });
     connection.client = fake.client;
 
-    await new ImapProvider(config).unarchiveMessages(["7"]);
+    await new ImapProvider(config).unarchiveMessages([
+      qualifiedId("Archive", 7),
+    ]);
 
     expect(moved).toEqual([{ uid: 7, folder: "INBOX", from: "Archive" }]);
   });
 
   it("untrashMessages moves from the Trash folder, not INBOX", async () => {
     const fake = createFakeClient([
-      { path: "INBOX", messages: [] },
-      { path: "Trash", specialUse: "\\Trash", messages: [] },
+      { path: "INBOX", messages: [message(5, "2026-01-01")] },
+      {
+        path: "Trash",
+        specialUse: "\\Trash",
+        messages: [message(5, "2026-01-02")],
+      },
     ]);
     const moved: Array<{ uid: number; folder: string; from: string }> = [];
-    fake.client.search = vi.fn(async (criteria: Record<string, unknown>) => {
-      if (criteria.uid !== undefined) return [1];
-      return [5];
-    });
+    const defaultMove = fake.client.messageMove;
     fake.client.messageMove = vi.fn(async (uid: string, folder: string) => {
       moved.push({ uid: Number(uid), folder, from: fake.opened.at(-1) || "" });
+      return defaultMove(uid, folder);
     });
     connection.client = fake.client;
 
-    await new ImapProvider(config).untrashMessages(["5"]);
+    await new ImapProvider(config).untrashMessages([qualifiedId("Trash", 5)]);
 
     expect(moved).toEqual([{ uid: 5, folder: "INBOX", from: "Trash" }]);
+    // Same UID in INBOX is untouched: the pre-existing INBOX message keeps
+    // its date, Trash's copy arrives alongside, and Trash is drained.
+    const inboxDates = mailboxesOf(fake)
+      .INBOX.map((m) => m.date)
+      .sort();
+    expect(inboxDates).toEqual(["2026-01-01", "2026-01-02"]);
+    expect(mailboxesOf(fake).Trash).toEqual([]);
   });
 
   it("archiveMessages rethrows unexpected move errors", async () => {
@@ -646,7 +798,7 @@ describe("ImapProvider restore paths", () => {
     connection.client = fake.client;
 
     await expect(
-      new ImapProvider(config).archiveMessages(["1"]),
+      new ImapProvider(config).archiveMessages([qualifiedId("INBOX", 1)]),
     ).rejects.toThrow(/UID not found/);
   });
 });

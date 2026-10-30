@@ -1,6 +1,7 @@
 import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findDraftsFolder } from "@/utils/imap/folder";
+import { encodeImapMessageId } from "@/utils/imap/message-id";
 import { saveDraft } from "@/utils/imap/draft";
 
 vi.mock("@/utils/imap/folder", () => ({
@@ -8,7 +9,7 @@ vi.mock("@/utils/imap/folder", () => ({
 }));
 
 function createClient() {
-  const append = vi.fn(async () => ({ uid: 42 }));
+  const append = vi.fn(async () => ({ uid: 42, uidValidity: 1 }));
   const mailboxCreate = vi.fn(async () => undefined);
   const client = { append, mailboxCreate } as unknown as ImapFlow;
   return { client, append, mailboxCreate };
@@ -48,7 +49,7 @@ describe("saveDraft", () => {
   });
 
   it("writes headers and body unchanged for clean input", async () => {
-    await saveDraft(client, {
+    const id = await saveDraft(client, {
       from: "me@example.com",
       to: "to@example.com",
       subject: "Weekly update",
@@ -56,6 +57,9 @@ describe("saveDraft", () => {
       references: "<root@example.com>",
       text: "Hello",
     });
+
+    // Draft ids are folder-qualified so later reads/deletes open Drafts.
+    expect(id).toBe(encodeImapMessageId("Drafts", 42));
 
     const headers = appendedHeaderLines(append);
     expect(headers).toEqual(
@@ -98,5 +102,18 @@ describe("saveDraft", () => {
       }),
     ).rejects.toThrow("No Drafts folder found");
     expect(append).not.toHaveBeenCalled();
+  });
+
+  it("throws a clear error when APPEND returns no UID (no UIDPLUS)", async () => {
+    append.mockResolvedValueOnce({ uidValidity: 123 });
+
+    await expect(
+      saveDraft(client, {
+        from: "me@example.com",
+        to: "to@example.com",
+        subject: "Hello",
+        text: "body",
+      }),
+    ).rejects.toThrow(/did not return a UID/i);
   });
 });

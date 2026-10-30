@@ -3,6 +3,7 @@ import {
   buildThreadId,
   getAllThreadMessageIds,
   getRootMessageId,
+  parseFallbackThreadId,
   parseMessageIdList,
 } from "@/utils/imap/thread";
 
@@ -74,6 +75,42 @@ describe("buildThreadId with a fallback key", () => {
     expect(buildThreadId(undefined, undefined, undefined, "INBOX:1")).toBe(
       buildThreadId(undefined, undefined, undefined, "INBOX:1"),
     );
+  });
+
+  it("keeps the folder:uid key verbatim in the thread id", () => {
+    expect(buildThreadId(undefined, undefined, undefined, "INBOX:1")).toBe(
+      "fallback:INBOX:1",
+    );
+  });
+});
+
+describe("parseFallbackThreadId", () => {
+  it("recovers folder and uid from a header-less thread id", () => {
+    expect(parseFallbackThreadId("fallback:INBOX:9")).toEqual({
+      folder: "INBOX",
+      uid: 9,
+    });
+    expect(parseFallbackThreadId("fallback:All Mail:12")).toEqual({
+      folder: "All Mail",
+      uid: 12,
+    });
+  });
+
+  it("returns null for hashed (header-derived) thread ids", () => {
+    expect(
+      parseFallbackThreadId(buildThreadId(undefined, undefined, "<a@x>")),
+    ).toBeNull();
+  });
+
+  it.each([
+    "fallback:",
+    "fallback:INBOX",
+    "fallback:INBOX:",
+    "fallback::9",
+    "fallback:INBOX:0",
+    "fallback:INBOX:x",
+  ])("rejects malformed key %s", (threadId) => {
+    expect(() => parseFallbackThreadId(threadId)).toThrow();
   });
 });
 

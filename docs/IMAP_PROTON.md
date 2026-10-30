@@ -86,13 +86,16 @@ EHLO/auth check. Read-only; user runs it against their own Bridge.
 
 | Feature | Status | Basis |
 |---|---|---|
-| Inbox read | code-verified | `getInboxMessages`/`getMessagesWithPagination` open INBOX read-only |
-| Archive | code-verified | `archiveThread` moves to `findArchiveFolder` (special-use `\Archive`, name fallback, creates `Archive`) |
-| Trash | code-verified | `trashThread` moves to `findTrashFolder` (special-use `\Trash`, name fallback; no-op when absent) |
+| Inbox read | code-verified | `getInboxMessages`/`getMessagesWithPagination` open INBOX read-only; ids are folder-qualified (`uid@base64url(folder)`) so same-UID messages in different folders never collide |
+| Archive | code-verified | Per-member: each thread member moves from its own mailbox to `findArchiveFolder` (special-use `\Archive`, name fallback, creates `Archive`); members already there are skipped; vanished thread is a no-op like Gmail's 404-success |
+| Trash | code-verified | Per-member: each thread member moves from its own mailbox to `findTrashFolder` (special-use `\Trash`, name fallback; no-op when absent); vanished thread is a no-op like Gmail's 200-success |
+| Unarchive/untrash/restore | code-verified | Per-member restore from the member's own mailbox to INBOX; the id names the source folder, so a same-UID message elsewhere is never touched |
+| Thread resolution | code-verified | Members key by full id (folder+UID); scope covers Trash and Junk so untrash/markNotSpam find threads living only there; header-less threads carry their `folder:uid` key in the id and fetch directly |
 | Labels | code-verified with folder fallback | Labels are folders (`getOrCreateFolder`); `removeThreadLabel(s)` are documented no-ops since a message lives in one folder. Custom keywords are NOT written: no `messageFlagsAdd` of `$`-labels anywhere outside `\Seen`/`\Flagged`. Whether Bridge advertises `PERMANENTFLAGS \*` is a **needs live check** (probe prints it) |
 | Send | code-verified | `sendSmtpEmail` via nodemailer STARTTLS to Bridge SMTP; Bridge saves to Sent automatically per Bridge docs |
-| Drafts | code-verified | `saveDraft` APPENDs with `\Draft`; creates the Drafts folder when missing, else a clear error. `sendDraft`/`updateDraft` explicitly unsupported |
-| Search | code-verified, INBOX-only by default | `parseSearchQuery` covers from/to/subject/body/phrases/dates; `inboxOnly: false` searches Bridge's `\All` mailbox when listed, else every selectable mailbox except trash/junk/drafts |
+| Drafts | code-verified | `saveDraft` APPENDs with `\Draft` and returns a folder-qualified id; creates the Drafts folder when missing, else a clear error; APPEND without a UID (no UIDPLUS) throws instead of returning a UIDVALIDITY-shaped id. `sendDraft`/`updateDraft` explicitly unsupported |
+| Role labels | code-verified | `convertImapMessage` maps roles from `specialUse` flags + exact well-known names only; user folders like `Presentations` never read as SENT |
+| Search | code-verified, INBOX-only by default | `parseSearchQuery` covers from/to/subject/body/phrases/dates; `inboxOnly: false` searches Bridge's `\All` mailbox when listed, else every selectable mailbox except trash/junk/drafts (thread resolution additionally includes trash/junk); exact-address filters run before any slicing so substring hits can't hide exact matches |
 | Local mail sync | code-verified | `getImapMailboxSyncPage` delta/snapshot with UIDVALIDITY reset handling |
 | Automation on new mail (rules, AI) | not implemented | `/api/imap/poll` only advances `lastSeenUid` and counts messages; nothing consumes them. `utils/webhook/process-history.ts` returns early for IMAP, so rules/assistant never see a newly arrived IMAP message |
 | AI assistant | code-verified (provider surface) | `ImapProvider` implements the full `EmailProvider` interface and is constructed by the provider factory, so assistant flows run against it; answer quality on real mail is a **needs live check** |
@@ -101,11 +104,15 @@ EHLO/auth check. Read-only; user runs it against their own Bridge.
 
 ## Known limitations
 
-- **DNS rebinding**: hosts are validated only at link time (`validateImapHosts` on test-connection and create). Acceptable for trusted single-tenant local use.
 - **Polling instead of IDLE**: `/api/imap/poll` compares UIDNEXT against `lastSeenUid`. No IDLE listener.
+- **First poll baselines**: linking seeds `lastSeenUid` from `uidNext - 1` and a null cursor baselines instead of reporting history as new.
+- **Poll has no UIDVALIDITY tracking**: the poll cursor stores only `lastSeenUid`; a server-side UID reset (UIDVALIDITY change) is not detected by poll (local mail sync, which stores UIDVALIDITY in its cursor, still resets correctly). No schema change was made for this; poll may under-report after a UID renumbering.
+- **Thread lookup window**: thread resolution scans the newest 200 messages per folder, then follows reference chains; "thread not found" can mean members are all older than that window and unlinked by references.
 - **Deletions invisible**: expunged UIDs are not reported as deletions (`deletedMessageIds` always `[]`); removals only surface as a full reset when UIDVALIDITY changes.
+- **Drafts need UIDPLUS**: APPEND without a UID response throws a clear error; servers without UIDPLUS cannot create drafts.
 - **`getAttachmentStream` unsupported**: attachment viewers/download flows that need bytes throw.
 - **`sendDraft`/`updateDraft` unsupported**: drafts can be created/listed/deleted, not edited or sent from the draft store.
 - **`removeThreadLabel(s)` are no-ops**: folder-based labels can't be detached without moving the message.
 - **No filters/contacts/signatures/send-as**: `createFilter`, contacts, signatures, and send-as return empty or throw.
 - **Bridge offline = connection refused**: the app surfaces the IMAP/SMTP error; nothing queues locally.
+- **DNS rebinding**: hosts are validated only at link time (`validateImapHosts` on test-connection and create). Acceptable for trusted single-tenant local use.

@@ -27,6 +27,7 @@ import type { Logger } from "@/utils/logger";
 import type { ParsedMessage } from "@/utils/types";
 import type { ImapCredentialConfig } from "@/utils/imap/types";
 import { UnsupportedImapOperationError } from "@/utils/imap/types";
+import { SafeError } from "@/utils/error";
 import { withImapConnection } from "@/utils/imap/client";
 import {
   convertImapMessage,
@@ -52,10 +53,14 @@ import {
   listFoldersAsOutlookFolders,
   moveMessageToFolder,
 } from "@/utils/imap/folder";
+import { parseImapMessageId } from "@/utils/imap/message-id";
 import { saveDraft } from "@/utils/imap/draft";
 import { sendSmtpEmail } from "@/utils/imap/mail";
-import { buildThreadId, getAllThreadMessageIds } from "@/utils/imap/thread";
-import { SafeError } from "@/utils/error";
+import {
+  buildThreadId,
+  getAllThreadMessageIds,
+  parseFallbackThreadId,
+} from "@/utils/imap/thread";
 import { extractEmailAddress, splitRecipientList } from "@/utils/email";
 import { createScopedLogger } from "@/utils/logger";
 import { escapeHtml, textToHtmlParagraphs } from "@/utils/string";
@@ -89,9 +94,10 @@ export class ImapProvider implements EmailProvider {
   // --- Message Operations ---
 
   async getMessage(messageId: string): Promise<ParsedMessage> {
+    const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX", { readOnly: true });
-      const msg = await fetchMessageByUid(client, Number(messageId));
+      await client.mailboxOpen(folder, { readOnly: true });
+      const msg = await fetchMessageByUid(client, uid);
       if (!msg) throw new Error(`Message ${messageId} not found`);
       return msg;
     });
@@ -101,21 +107,30 @@ export class ImapProvider implements EmailProvider {
     rfc822MessageId: string,
   ): Promise<ParsedMessage | null> {
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX", { readOnly: true });
-      const uids = await searchImapMessages(
-        client,
-        { header: { "Message-ID": rfc822MessageId } },
-        1,
-      );
-      if (uids.length === 0) return null;
-      return fetchMessageByUid(client, uids[0]);
+      const folders = await resolveSearchFolders(client);
+      for (const folder of folders) {
+        await client.mailboxOpen(folder, { readOnly: true });
+        const uids = await searchImapMessages(
+          client,
+          { header: { "Message-ID": rfc822MessageId } },
+          1,
+        );
+        if (uids.length === 0) continue;
+        return fetchMessageByUid(client, uids[0]);
+      }
+      return null;
     });
   }
 
   async getMessagesBatch(messageIds: string[]): Promise<ParsedMessage[]> {
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX", { readOnly: true });
-      return fetchMessagesByUids(client, messageIds.map(Number));
+      const grouped = groupMessageIdsByFolder(messageIds);
+      const messages: ParsedMessage[] = [];
+      for (const [folder, uids] of grouped) {
+        await client.mailboxOpen(folder, { readOnly: true });
+        messages.push(...(await fetchMessagesByUids(client, uids)));
+      }
+      return messages;
     });
   }
 
@@ -525,12 +540,10 @@ export class ImapProvider implements EmailProvider {
   }): Promise<{ usedFallback?: boolean; actualLabelId?: string }> {
     // For IMAP, "labeling" means moving to a folder
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
-      await moveMessageToFolder(
-        client,
-        Number(options.messageId),
-        options.labelId,
-      );
+      const { folder, uid } = parseImapMessageId(options.messageId);
+      if (folder === options.labelId) return { actualLabelId: options.labelId };
+      await client.mailboxOpen(folder);
+      await moveMessageToFolder(client, uid, options.labelId);
       return { actualLabelId: options.labelId };
     });
   }
@@ -555,14 +568,28 @@ export class ImapProvider implements EmailProvider {
   // --- Thread Actions ---
 
   async archiveThread(threadId: string, _ownerEmail: string): Promise<void> {
-    const messages = await this.getThreadMessages(threadId);
+    let messages: ParsedMessage[];
+    try {
+      messages = await this.getThreadMessages(threadId);
+    } catch (error) {
+      // Gmail treats archiving a vanished thread as success (404 → no-op);
+      // IMAP already throws "not found" from getThreadMessages, so match it
+      // instead of failing automations that race a concurrent move.
+      if (error instanceof Error && /not found/i.test(error.message)) {
+        this.logger.warn("IMAP archiveThread on missing thread", { threadId });
+        return;
+      }
+      throw error;
+    }
 
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       const archiveFolder = await findArchiveFolder(client);
       for (const msg of messages) {
+        const { folder, uid } = parseImapMessageId(msg.id);
+        if (folder === archiveFolder) continue;
+        await client.mailboxOpen(folder);
         try {
-          await moveMessageToFolder(client, Number(msg.id), archiveFolder);
+          await moveMessageToFolder(client, uid, archiveFolder);
         } catch (error) {
           if (isAlreadyInTargetError(error)) continue;
           this.logger.warn("IMAP archiveThread move failed", {
@@ -585,9 +612,11 @@ export class ImapProvider implements EmailProvider {
     if (_labelId) {
       const messages = await this.getThreadMessages(threadId);
       return this.withConnection(async (client) => {
-        await client.mailboxOpen("INBOX");
         for (const msg of messages) {
-          await moveMessageToFolder(client, Number(msg.id), _labelId);
+          const { folder, uid } = parseImapMessageId(msg.id);
+          if (folder === _labelId) continue;
+          await client.mailboxOpen(folder);
+          await moveMessageToFolder(client, uid, _labelId);
         }
       });
     }
@@ -595,10 +624,12 @@ export class ImapProvider implements EmailProvider {
   }
 
   async archiveMessage(messageId: string): Promise<void> {
+    const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       const archiveFolder = await findArchiveFolder(client);
-      await moveMessageToFolder(client, Number(messageId), archiveFolder);
+      if (folder === archiveFolder) return;
+      await client.mailboxOpen(folder);
+      await moveMessageToFolder(client, uid, archiveFolder);
     });
   }
 
@@ -607,15 +638,28 @@ export class ImapProvider implements EmailProvider {
     _ownerEmail: string,
     _actionSource: "user" | "automation",
   ): Promise<void> {
-    const messages = await this.getThreadMessages(threadId);
+    let messages: ParsedMessage[];
+    try {
+      messages = await this.getThreadMessages(threadId);
+    } catch (error) {
+      // Same no-op-on-missing rule as archiveThread: Gmail trash returns 200
+      // for an already-deleted thread, so a raced automation must not fail.
+      if (error instanceof Error && /not found/i.test(error.message)) {
+        this.logger.warn("IMAP trashThread on missing thread", { threadId });
+        return;
+      }
+      throw error;
+    }
 
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       const trashFolder = await findTrashFolder(client);
       if (!trashFolder) return;
       for (const msg of messages) {
+        const { folder, uid } = parseImapMessageId(msg.id);
+        if (folder === trashFolder) continue;
+        await client.mailboxOpen(folder);
         try {
-          await moveMessageToFolder(client, Number(msg.id), trashFolder);
+          await moveMessageToFolder(client, uid, trashFolder);
         } catch (error) {
           if (isAlreadyInTargetError(error)) continue;
           this.logger.warn("IMAP trashThread move failed", {
@@ -632,14 +676,15 @@ export class ImapProvider implements EmailProvider {
   async markReadThread(threadId: string, read: boolean): Promise<void> {
     const messages = await this.getThreadMessages(threadId);
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       for (const msg of messages) {
+        const { folder, uid } = parseImapMessageId(msg.id);
+        await client.mailboxOpen(folder);
         if (read) {
-          await client.messageFlagsAdd(String(msg.id), ["\\Seen"], {
+          await client.messageFlagsAdd(String(uid), ["\\Seen"], {
             uid: true,
           });
         } else {
-          await client.messageFlagsRemove(String(msg.id), ["\\Seen"], {
+          await client.messageFlagsRemove(String(uid), ["\\Seen"], {
             uid: true,
           });
         }
@@ -655,22 +700,17 @@ export class ImapProvider implements EmailProvider {
     // Move to Junk/Spam folder
     const messages = await this.getThreadMessages(threadId);
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
-      const mailboxes = await client.list();
-      const junkFolder = mailboxes.find(
-        (mb) =>
-          mb.specialUse === "\\Junk" ||
-          mb.name.toLowerCase() === "spam" ||
-          mb.name.toLowerCase() === "junk",
-      );
-      const targetFolder = junkFolder?.path || "Junk";
+      const junkFolder = await findJunkFolder(client);
+      const targetFolder = junkFolder || "Junk";
 
       for (const msg of messages) {
-        await moveMessageToFolder(client, Number(msg.id), targetFolder);
+        const { folder, uid } = parseImapMessageId(msg.id);
+        if (folder === targetFolder) continue;
+        await client.mailboxOpen(folder);
+        await moveMessageToFolder(client, uid, targetFolder);
       }
     });
   }
-
   async blockUnsubscribedEmail(_messageId: string): Promise<void> {
     throw new UnsupportedImapOperationError("blockUnsubscribedEmail");
   }
@@ -682,9 +722,11 @@ export class ImapProvider implements EmailProvider {
   ): Promise<void> {
     const messages = await this.getThreadMessages(threadId);
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       for (const msg of messages) {
-        await moveMessageToFolder(client, Number(msg.id), folderName);
+        const { folder, uid } = parseImapMessageId(msg.id);
+        if (folder === folderName) continue;
+        await client.mailboxOpen(folder);
+        await moveMessageToFolder(client, uid, folderName);
       }
     });
   }
@@ -969,10 +1011,11 @@ ${messageContent}
   }
 
   async getDraft(draftId: string): Promise<ParsedMessage | null> {
-    const uid = parseImapUid(draftId, "Draft id");
+    const { folder, uid } = parseImapMessageId(draftId);
     return this.withConnection(async (client) => {
       const draftsFolder = await findDraftsFolder(client);
       if (!draftsFolder) return null;
+      if (folder !== draftsFolder) return null;
       await client.mailboxOpen(draftsFolder, { readOnly: true });
       return fetchMessageByUid(client, uid);
     });
@@ -1034,10 +1077,11 @@ ${messageContent}
   }
 
   async deleteDraft(draftId: string, _version?: string): Promise<boolean> {
-    const uid = parseImapUid(draftId, "Draft id");
+    const { folder, uid } = parseImapMessageId(draftId);
     return this.withConnection(async (client) => {
       const draftsFolder = await findDraftsFolder(client);
       if (!draftsFolder) return false;
+      if (folder !== draftsFolder) return false;
       await client.mailboxOpen(draftsFolder);
       await client.messageDelete(String(uid), { uid: true });
       return true;
@@ -1119,11 +1163,11 @@ ${messageContent}
       const sentFolder = await findSentFolder(client);
       if (!sentFolder) return false;
       await client.mailboxOpen(sentFolder, { readOnly: true });
-      const candidates = await searchImapMessages(
-        client,
-        { to: senderEmail },
-        1,
-      );
+      // Exact-match first: substring SEARCH can hide the exact reply behind
+      // a newer substring hit when the window is sliced before filtering.
+      const candidates = await searchImapMessages(client, {
+        to: senderEmail,
+      });
       const uids = await filterUidsByExactAddress(
         client,
         candidates,
@@ -1170,11 +1214,10 @@ ${messageContent}
         extractEmailAddress(options.from) ||
         options.from.match(/<([^>]+)>/)?.[1] ||
         options.from;
-      const candidates = await searchImapMessages(
-        client,
-        { to: email, before: options.date },
-        1,
-      );
+      const candidates = await searchImapMessages(client, {
+        to: email,
+        before: options.date,
+      });
       const uids = await filterUidsByExactAddress(
         client,
         candidates,
@@ -1194,19 +1237,18 @@ ${messageContent}
     return !!(message.headers["in-reply-to"] || message.headers.references);
   }
 
-  // --- Batch message state (UIDs are per-folder; INBOX is assumed, and
-  // missing messages are skipped like the Microsoft 404-tolerant batches) ---
-
   async archiveMessages(
     messageIds: string[],
     _labelId?: string,
   ): Promise<void> {
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       const archiveFolder = await findArchiveFolder(client);
       for (const messageId of new Set(messageIds)) {
+        const { folder, uid } = parseImapMessageId(messageId);
+        if (folder === archiveFolder) continue;
+        await client.mailboxOpen(folder);
         try {
-          await moveMessageToFolder(client, Number(messageId), archiveFolder);
+          await moveMessageToFolder(client, uid, archiveFolder);
         } catch (error) {
           if (isAlreadyInTargetError(error)) continue;
           this.logger.warn("IMAP archiveMessages move failed", {
@@ -1221,30 +1263,27 @@ ${messageContent}
 
   async unarchiveMessages(messageIds: string[]): Promise<void> {
     return this.withConnection(async (client) => {
-      const archiveFolder = await findArchiveFolder(client);
-      const folders = await resolveSearchFolders(client);
       for (const messageId of new Set(messageIds)) {
-        await moveMessageFromFolders(
-          client,
-          Number(messageId),
-          "INBOX",
-          [archiveFolder, ...folders],
-          this.logger,
-        );
+        const { folder, uid } = parseImapMessageId(messageId);
+        if (folder === "INBOX") continue;
+        await client.mailboxOpen(folder);
+        await moveMessageToFolder(client, uid, "INBOX");
       }
     });
   }
 
   async trashMessages(messageIds: string[]): Promise<void> {
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       const trashFolder = await findTrashFolder(client);
       if (!trashFolder) return;
       for (const messageId of new Set(messageIds)) {
+        const { folder, uid } = parseImapMessageId(messageId);
+        if (folder === trashFolder) continue;
+        await client.mailboxOpen(folder);
         try {
-          await moveMessageToFolder(client, Number(messageId), trashFolder);
+          await moveMessageToFolder(client, uid, trashFolder);
         } catch {
-          // Message may live in another folder
+          this.logger.warn("IMAP trashMessages move failed", { messageId });
         }
       }
     });
@@ -1252,17 +1291,11 @@ ${messageContent}
 
   async untrashMessages(messageIds: string[]): Promise<void> {
     return this.withConnection(async (client) => {
-      const trashFolder = await findTrashFolder(client);
-      if (!trashFolder) throw new Error("No trash folder found");
-      const folders = await resolveSearchFolders(client);
       for (const messageId of new Set(messageIds)) {
-        await moveMessageFromFolders(
-          client,
-          Number(messageId),
-          "INBOX",
-          [trashFolder, ...folders],
-          this.logger,
-        );
+        const { folder, uid } = parseImapMessageId(messageId);
+        if (folder === "INBOX") continue;
+        await client.mailboxOpen(folder);
+        await moveMessageToFolder(client, uid, "INBOX");
       }
     });
   }
@@ -1272,20 +1305,21 @@ ${messageContent}
     read: boolean,
   ): Promise<void> {
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       for (const messageId of new Set(messageIds)) {
+        const { folder, uid } = parseImapMessageId(messageId);
+        await client.mailboxOpen(folder);
         try {
           if (read) {
-            await client.messageFlagsAdd(String(messageId), ["\\Seen"], {
+            await client.messageFlagsAdd(String(uid), ["\\Seen"], {
               uid: true,
             });
           } else {
-            await client.messageFlagsRemove(String(messageId), ["\\Seen"], {
+            await client.messageFlagsRemove(String(uid), ["\\Seen"], {
               uid: true,
             });
           }
         } catch {
-          // Message may live in another folder
+          this.logger.warn("IMAP markMessagesReadState failed", { messageId });
         }
       }
     });
@@ -1296,29 +1330,33 @@ ${messageContent}
     starred: boolean,
   ): Promise<void> {
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       for (const messageId of new Set(messageIds)) {
+        const { folder, uid } = parseImapMessageId(messageId);
+        await client.mailboxOpen(folder);
         try {
           if (starred) {
-            await client.messageFlagsAdd(String(messageId), ["\\Flagged"], {
+            await client.messageFlagsAdd(String(uid), ["\\Flagged"], {
               uid: true,
             });
           } else {
-            await client.messageFlagsRemove(String(messageId), ["\\Flagged"], {
+            await client.messageFlagsRemove(String(uid), ["\\Flagged"], {
               uid: true,
             });
           }
         } catch {
-          // Message may live in another folder
+          this.logger.warn("IMAP markMessagesStarredState failed", {
+            messageId,
+          });
         }
       }
     });
   }
 
   async starMessage(messageId: string): Promise<void> {
+    const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
-      await client.messageFlagsAdd(String(messageId), ["\\Flagged"], {
+      await client.mailboxOpen(folder);
+      await client.messageFlagsAdd(String(uid), ["\\Flagged"], {
         uid: true,
       });
     });
@@ -1327,16 +1365,11 @@ ${messageContent}
   async markNotSpam(threadId: string): Promise<void> {
     const messages = await this.getThreadMessages(threadId);
     return this.withConnection(async (client) => {
-      const junkFolder = await findJunkFolder(client);
-      const folders = await resolveSearchFolders(client);
       for (const msg of messages) {
-        await moveMessageFromFolders(
-          client,
-          Number(msg.id),
-          "INBOX",
-          [junkFolder, ...folders].filter((f) => f !== null),
-          this.logger,
-        );
+        const { folder, uid } = parseImapMessageId(msg.id);
+        if (folder === "INBOX") continue;
+        await client.mailboxOpen(folder);
+        await moveMessageToFolder(client, uid, "INBOX");
       }
     });
   }
@@ -1344,16 +1377,11 @@ ${messageContent}
   async unarchiveThread(threadId: string): Promise<void> {
     const messages = await this.getThreadMessages(threadId);
     return this.withConnection(async (client) => {
-      const archiveFolder = await findArchiveFolder(client);
-      const folders = await resolveSearchFolders(client);
       for (const msg of messages) {
-        await moveMessageFromFolders(
-          client,
-          Number(msg.id),
-          "INBOX",
-          [archiveFolder, ...folders],
-          this.logger,
-        );
+        const { folder, uid } = parseImapMessageId(msg.id);
+        if (folder === "INBOX") continue;
+        await client.mailboxOpen(folder);
+        await moveMessageToFolder(client, uid, "INBOX");
       }
     });
   }
@@ -1391,12 +1419,14 @@ ${messageContent}
     const succeededThreadIds: string[] = [];
     const failedThreadIds: string[] = [];
     await this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
       const archiveFolder = await findArchiveFolder(client);
       for (const thread of threads) {
         try {
           for (const messageId of thread.messageIds) {
-            await moveMessageToFolder(client, Number(messageId), archiveFolder);
+            const { folder, uid } = parseImapMessageId(messageId);
+            if (folder === archiveFolder) continue;
+            await client.mailboxOpen(folder);
+            await moveMessageToFolder(client, uid, archiveFolder);
           }
           succeededThreadIds.push(thread.threadId);
         } catch {
@@ -1517,9 +1547,10 @@ ${messageContent}
   }
 
   async getMessageSource(messageId: string): Promise<Buffer> {
+    const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX", { readOnly: true });
-      const downloaded = await client.download(String(messageId), undefined, {
+      await client.mailboxOpen(folder, { readOnly: true });
+      const downloaded = await client.download(String(uid), undefined, {
         uid: true,
       });
       const chunks: Buffer[] = [];
@@ -1643,15 +1674,24 @@ ${messageContent}
  * Mailboxes a whole-account IMAP search should cover.
  * Proton Bridge exposes every message through its `\All` mailbox, so search
  * that instead of re-reading each folder; otherwise use every selectable
- * mailbox except the trash, junk and drafts special-use folders.
+ * mailbox except the drafts special-use folder. Trash and Junk are excluded
+ * by default (listing/search scope) but included for thread resolution, so
+ * untrash/markNotSpam can find threads living only there.
  */
-async function resolveSearchFolders(client: ImapFlow): Promise<string[]> {
+async function resolveSearchFolders(
+  client: ImapFlow,
+  options?: { includeTrashAndJunk?: boolean },
+): Promise<string[]> {
   const mailboxes = await client.list();
 
   const allMail = mailboxes.find((mb) => mb.specialUse === "\\All");
   if (allMail) return [allMail.path];
 
-  const skippedSpecialUse = new Set(["\\Trash", "\\Junk", "\\Drafts"]);
+  const skippedSpecialUse = new Set(
+    options?.includeTrashAndJunk
+      ? ["\\Drafts"]
+      : ["\\Trash", "\\Junk", "\\Drafts"],
+  );
   const paths = mailboxes
     .filter((mb) => mb.listed && !mb.flags.has("\\Noselect"))
     .filter((mb) => !mb.specialUse || !skippedSpecialUse.has(mb.specialUse))
@@ -1660,59 +1700,22 @@ async function resolveSearchFolders(client: ImapFlow): Promise<string[]> {
   return paths.length > 0 ? paths : ["INBOX"];
 }
 
-function parseImapUid(id: string, what: string): number {
-  if (!/^[1-9]\d*$/.test(id))
-    throw new SafeError(`${what} must be a positive integer UID`);
-  return Number(id);
-}
-
-const PROTECTED_SPECIAL_USE = new Set([
-  "\\Sent",
-  "\\Trash",
-  "\\Drafts",
-  "\\Junk",
-  "\\Archive",
-  "\\All",
-]);
-
-async function assertDeletableFolder(
-  client: ImapFlow,
-  folderId: string,
-): Promise<void> {
-  if (folderId.toLowerCase() === "inbox")
-    throw new SafeError("INBOX cannot be deleted");
-  const mailboxes = await client.list();
-  const mailbox = mailboxes.find(
-    (mb) => mb.path.toLowerCase() === folderId.toLowerCase(),
-  );
-  if (mailbox?.specialUse && PROTECTED_SPECIAL_USE.has(mailbox.specialUse))
-    throw new SafeError(
-      `Special-use mailbox ${mailbox.specialUse} cannot be deleted`,
-    );
-}
-
 /**
- * IMAP FROM/TO SEARCH is substring-based: `ann@x.com` also matches
- * `joann@x.com`. Fetch the candidates and keep only messages whose
- * envelope address equals the target (case-insensitive).
+ * Group qualified message ids by folder so each member's own mailbox is
+ * opened exactly once. Malformed ids throw (fail closed, never act on the
+ * wrong message).
  */
-async function filterUidsByExactAddress(
-  client: ImapFlow,
-  uids: number[],
-  header: "from" | "to",
-  email: string,
-): Promise<number[]> {
-  const target = email.toLowerCase();
-  const messages = await fetchMessagesByUids(client, uids);
-  return messages
-    .filter((message) => {
-      const headerValue =
-        header === "from" ? message.headers.from : message.headers.to;
-      return splitRecipientList(headerValue).some(
-        (entry) => extractEmailAddress(entry).toLowerCase() === target,
-      );
-    })
-    .map((message) => Number(message.id));
+function groupMessageIdsByFolder(
+  messageIds: string[],
+): Map<string, Array<{ folder: string; uid: number }>> {
+  const grouped = new Map<string, Array<{ folder: string; uid: number }>>();
+  for (const messageId of new Set(messageIds)) {
+    const parsed = parseImapMessageId(messageId);
+    const existing = grouped.get(parsed.folder);
+    if (existing) existing.push(parsed);
+    else grouped.set(parsed.folder, [parsed]);
+  }
+  return grouped;
 }
 
 /**
@@ -1721,13 +1724,30 @@ async function filterUidsByExactAddress(
  * and In-Reply-To headers for any member, follow each hit's reference chain
  * to the other members, and fetch them wherever they live. Members found by
  * an exact thread-id match are exact; header SEARCH is substring-based, so
- * candidates are re-verified before acting on them.
+ * candidates are re-verified before acting on them. Members key by full id
+ * (folder+UID): UIDs repeat across folders. Thread resolution covers Trash
+ * and Junk too. Limitation: only the newest 200 messages per folder are
+ * scanned, so "thread not found" can mean the thread's members are all
+ * older than that window and unlinked by references.
  */
 async function fetchThreadMessages(
   client: ImapFlow,
   threadId: string,
 ): Promise<ParsedMessage[]> {
-  const folders = await resolveSearchFolders(client);
+  // Header-less messages keep their `folder:uid` listing key in the thread
+  // id, so the owning message is fetchable directly — no scan needed, and
+  // on Proton (where only `\All` is scanned) the key still names the folder
+  // the caller originally listed.
+  const fallback = parseFallbackThreadId(threadId);
+  if (fallback) {
+    await client.mailboxOpen(fallback.folder, { readOnly: true });
+    const direct = await fetchMessageByUid(client, fallback.uid);
+    return direct ? [direct] : [];
+  }
+
+  const folders = await resolveSearchFolders(client, {
+    includeTrashAndJunk: true,
+  });
   const byUid = new Map<string, ParsedMessage>();
 
   for (const folder of folders) {
@@ -1797,41 +1817,55 @@ async function filterThreadCandidates(
   return messages.filter((message) => message.threadId === threadId);
 }
 
-/**
- * Move one UID to a target folder, trying each source folder in order.
- * UIDs are per-folder, so a message may live outside the folder the caller
- * opened: open every candidate and move from the one that has it.
- */
-async function moveMessageFromFolders(
+const PROTECTED_SPECIAL_USE = new Set([
+  "\\Sent",
+  "\\Trash",
+  "\\Drafts",
+  "\\Junk",
+  "\\Archive",
+  "\\All",
+]);
+
+async function assertDeletableFolder(
   client: ImapFlow,
-  uid: number,
-  targetFolder: string,
-  sourceFolders: string[],
-  log: Logger,
+  folderId: string,
 ): Promise<void> {
-  let lastError: unknown = null;
-  for (const folder of new Set(sourceFolders)) {
-    await client.mailboxOpen(folder);
-    try {
-      const moved = await moveMessageToFolder(client, uid, targetFolder);
-      if (moved !== false) return;
-      lastError = new Error(`UID ${uid} not in ${folder}`);
-    } catch (error) {
-      if (isAlreadyInTargetError(error)) return;
-      log.warn("IMAP move failed", { uid, folder, targetFolder, error });
-      throw error;
-    }
-  }
-  if (lastError) {
-    log.warn("IMAP move found no source folder", {
-      uid,
-      targetFolder,
-      error: lastError,
-    });
-    throw lastError;
-  }
+  if (folderId.toLowerCase() === "inbox")
+    throw new SafeError("INBOX cannot be deleted");
+  const mailboxes = await client.list();
+  const mailbox = mailboxes.find(
+    (mb) => mb.path.toLowerCase() === folderId.toLowerCase(),
+  );
+  if (mailbox?.specialUse && PROTECTED_SPECIAL_USE.has(mailbox.specialUse))
+    throw new SafeError(
+      `Special-use mailbox ${mailbox.specialUse} cannot be deleted`,
+    );
 }
 
+/**
+ * IMAP FROM/TO SEARCH is substring-based: `ann@x.com` also matches
+ * `joann@x.com`. Fetch the candidates and keep only the UIDs whose
+ * envelope address equals the target (case-insensitive).
+ */
+async function filterUidsByExactAddress(
+  client: ImapFlow,
+  uids: number[],
+  header: "from" | "to",
+  email: string,
+): Promise<number[]> {
+  const target = email.toLowerCase();
+  const messages = await fetchMessagesByUids(client, uids);
+  const matched: number[] = [];
+  for (const message of messages) {
+    const headerValue =
+      header === "from" ? message.headers.from : message.headers.to;
+    const exact = splitRecipientList(headerValue).some(
+      (entry) => extractEmailAddress(entry).toLowerCase() === target,
+    );
+    if (exact) matched.push(parseImapMessageId(message.id).uid);
+  }
+  return matched;
+}
 function isAlreadyInTargetError(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error);
   return /already (exists|in|there)|ALREADYEXISTS/i.test(text);

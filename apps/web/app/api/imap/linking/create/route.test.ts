@@ -14,6 +14,13 @@ vi.mock("@/utils/middleware", async () => {
 vi.mock("@/utils/encryption", () => ({
   encryptToken: vi.fn(() => "encrypted-password"),
 }));
+vi.mock("@/utils/imap/client", () => ({
+  createImapConnection: vi.fn(() => ({
+    connect: vi.fn(async () => undefined),
+    mailboxOpen: vi.fn(async () => ({ uidNext: 42 })),
+    logout: vi.fn(async () => undefined),
+  })),
+}));
 
 const mockEnv = vi.hoisted(() => ({
   IMAP_ALLOW_PRIVATE_HOSTS: false,
@@ -49,6 +56,7 @@ function postLinkingCreate(body: Record<string, unknown>) {
 describe("POST /api/imap/linking/create", () => {
   beforeEach(() => {
     mockEnv.IMAP_ALLOW_PRIVATE_HOSTS = false;
+    vi.clearAllMocks();
   });
 
   it("links an account for public hosts", async () => {
@@ -63,6 +71,46 @@ describe("POST /api/imap/linking/create", () => {
       emailAccountId: "email-account-1",
       email: "user@example.com",
     });
+    expect(prisma.account.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          imapCredential: expect.objectContaining({
+            create: expect.objectContaining({ lastSeenUid: 41 }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("links without a cursor seed when the probe cannot connect", async () => {
+    const { createImapConnection } = await import("@/utils/imap/client");
+    vi.mocked(createImapConnection).mockImplementationOnce(
+      () =>
+        ({
+          connect: vi.fn(async () => {
+            throw new Error("connection refused");
+          }),
+          logout: vi.fn(async () => undefined),
+        }) as never,
+    );
+    prisma.account.create.mockResolvedValue({
+      emailAccount: { id: "email-account-1", email: "user@example.com" },
+    } as never);
+
+    const response = await postLinkingCreate(validBody);
+
+    expect(response.status).toBe(200);
+    expect(prisma.account.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          imapCredential: expect.objectContaining({
+            create: expect.not.objectContaining({
+              lastSeenUid: expect.anything(),
+            }),
+          }),
+        }),
+      }),
+    );
   });
 
   it("rejects a metadata IMAP host without storing credentials", async () => {

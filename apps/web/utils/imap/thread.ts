@@ -1,4 +1,10 @@
 import { createHash } from "node:crypto";
+import { SafeError } from "@/utils/error";
+
+// Prefix for thread ids of header-less messages. The id carries the
+// `folder:uid` listing key verbatim (not hashed) so the owning message can be
+// derived back from the thread id without scanning every mailbox.
+const FALLBACK_THREAD_PREFIX = "fallback:";
 
 /**
  * Build a deterministic thread ID from email threading headers.
@@ -12,10 +18,11 @@ export function buildThreadId(
   fallbackKey?: string,
 ): string {
   if (!references && !inReplyTo && !messageId) {
-    // Header-less message: hash a per-message key (folder + UID) so two
-    // such messages never share a thread. Without a key there is nothing
-    // unique to hash, so keep the legacy constant.
-    return hashToThreadId(fallbackKey ? `fallback:${fallbackKey}` : "fallback");
+    // Header-less message: keep the per-message key in the thread id so the
+    // folder + UID stay derivable without a mailbox scan. Without a key
+    // there is nothing unique to hash, so keep the legacy constant.
+    if (fallbackKey) return `${FALLBACK_THREAD_PREFIX}${fallbackKey}`;
+    return hashToThreadId("fallback");
   }
   const rootId = getRootMessageId(references, inReplyTo, messageId);
   return hashToThreadId(rootId);
@@ -110,4 +117,27 @@ export function getAllThreadMessageIds(
   }
 
   return [...ids];
+}
+
+/**
+ * Recover the `folder:uid` listing key carried by a header-less thread id.
+ * Returns null for header-derived (hashed) thread ids. Rejects malformed
+ * keys so callers never fetch or act on a fabricated folder.
+ */
+export function parseFallbackThreadId(threadId: string): {
+  folder: string;
+  uid: number;
+} | null {
+  if (!threadId.startsWith(FALLBACK_THREAD_PREFIX)) return null;
+  const key = threadId.slice(FALLBACK_THREAD_PREFIX.length);
+  const colon = key.lastIndexOf(":");
+  if (colon <= 0 || colon === key.length - 1) {
+    throw new SafeError("Header-less thread id holds a malformed key");
+  }
+  const folder = key.slice(0, colon);
+  const uidText = key.slice(colon + 1);
+  if (!/^[1-9]\d*$/.test(uidText)) {
+    throw new SafeError("Header-less thread id holds an invalid UID");
+  }
+  return { folder, uid: Number(uidText) };
 }
