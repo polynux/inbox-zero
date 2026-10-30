@@ -61,7 +61,7 @@ export async function sendSmtpEmail(
       attachments: options.attachments,
     });
 
-    logger.info("Email sent via SMTP", {
+    logger.trace("Email sent via SMTP", {
       to: options.to,
       messageId: result.messageId,
     });
