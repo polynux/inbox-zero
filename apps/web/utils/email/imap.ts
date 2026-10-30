@@ -312,9 +312,12 @@ export class ImapProvider implements EmailProvider {
     };
   }
 
-  async getThreadMessages(threadId: string): Promise<ParsedMessage[]> {
+  async getThreadMessages(
+    threadId: string,
+    options?: { includeTrashAndJunk?: boolean },
+  ): Promise<ParsedMessage[]> {
     const messages = await this.withConnection((client) =>
-      fetchThreadMessages(client, threadId),
+      fetchThreadMessages(client, threadId, options),
     );
     if (messages.length === 0) throw new Error(`Thread ${threadId} not found`);
     return messages.sort(
@@ -1363,7 +1366,9 @@ ${messageContent}
   }
 
   async markNotSpam(threadId: string): Promise<void> {
-    const messages = await this.getThreadMessages(threadId);
+    const messages = await this.getThreadMessages(threadId, {
+      includeTrashAndJunk: true,
+    });
     return this.withConnection(async (client) => {
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
@@ -1387,7 +1392,19 @@ ${messageContent}
   }
 
   async untrashThread(threadId: string): Promise<void> {
-    return this.unarchiveThread(threadId);
+    // A thread whose only copy is in Trash is invisible to unarchiveThread,
+    // which now scans the same folders as every other thread operation.
+    const messages = await this.getThreadMessages(threadId, {
+      includeTrashAndJunk: true,
+    });
+    return this.withConnection(async (client) => {
+      for (const msg of messages) {
+        const { folder, uid } = parseImapMessageId(msg.id);
+        if (folder === "INBOX") continue;
+        await client.mailboxOpen(folder);
+        await moveMessageToFolder(client, uid, "INBOX");
+      }
+    });
   }
 
   async bulkArchiveSenderOrThrow(
@@ -1725,14 +1742,17 @@ function groupMessageIdsByFolder(
  * to the other members, and fetch them wherever they live. Members found by
  * an exact thread-id match are exact; header SEARCH is substring-based, so
  * candidates are re-verified before acting on them. Members key by full id
- * (folder+UID): UIDs repeat across folders. Thread resolution covers Trash
- * and Junk too. Limitation: only the newest 200 messages per folder are
- * scanned, so "thread not found" can mean the thread's members are all
- * older than that window and unlinked by references.
+ * (folder+UID): UIDs repeat across folders. Trash and Junk are scanned only
+ * when the caller asks for them (untrash/markNotSpam); every other thread
+ * operation must not act on a deleted reply. Limitation: only the newest 200
+ * messages per folder are scanned, so "thread not found" can mean the
+ * thread's members are all older than that window and unlinked by
+ * references.
  */
 async function fetchThreadMessages(
   client: ImapFlow,
   threadId: string,
+  options?: { includeTrashAndJunk?: boolean },
 ): Promise<ParsedMessage[]> {
   // Header-less messages keep their `folder:uid` listing key in the thread
   // id, so the owning message is fetchable directly — no scan needed, and
@@ -1745,9 +1765,7 @@ async function fetchThreadMessages(
     return direct ? [direct] : [];
   }
 
-  const folders = await resolveSearchFolders(client, {
-    includeTrashAndJunk: true,
-  });
+  const folders = await resolveSearchFolders(client, options);
   const byUid = new Map<string, ParsedMessage>();
 
   for (const folder of folders) {

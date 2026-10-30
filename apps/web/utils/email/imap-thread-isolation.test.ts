@@ -273,6 +273,56 @@ describe("thread resolution reaches Trash and Junk", () => {
   });
 });
 
+describe("thread ops other than untrash/markNotSpam ignore Trash and Junk", () => {
+  it("archiveThread leaves a trashed reply in Trash", async () => {
+    const { client, state } = build(
+      {
+        INBOX: [{ uid: 1, subject: "root", messageId: "<root@x>" }],
+        Trash: [
+          {
+            uid: 2,
+            subject: "deleted reply",
+            messageId: "<reply@x>",
+            inReplyTo: "<root@x>",
+          },
+        ],
+        Archive: [],
+      },
+      { Trash: "\\Trash", Archive: "\\Archive" },
+    );
+    connection.client = client;
+
+    const threadId = buildThreadId(undefined, undefined, "<root@x>");
+    await new ImapProvider(config).archiveThread(threadId, "owner@example.com");
+
+    expect(state.moves).toEqual([{ uid: 1, from: "INBOX", to: "Archive" }]);
+  });
+
+  it("unarchiveThread (snooze wake-up) does not pull a trashed reply into INBOX", async () => {
+    const { client, state } = build(
+      {
+        INBOX: [],
+        Archive: [{ uid: 1, subject: "root", messageId: "<root@x>" }],
+        Trash: [
+          {
+            uid: 2,
+            subject: "deleted reply",
+            messageId: "<reply@x>",
+            inReplyTo: "<root@x>",
+          },
+        ],
+      },
+      { Trash: "\\Trash", Archive: "\\Archive" },
+    );
+    connection.client = client;
+
+    const threadId = buildThreadId(undefined, undefined, "<root@x>");
+    await new ImapProvider(config).unarchiveThread(threadId);
+
+    expect(state.moves).toEqual([{ uid: 1, from: "Archive", to: "INBOX" }]);
+  });
+});
+
 describe("header-less threads resolve without a full scan", () => {
   it("fetches a header-less thread directly when only \\All is scanned", async () => {
     const { client } = build(
