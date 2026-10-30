@@ -26,6 +26,8 @@ const BLOCKED_IP_RANGES = new Set([
   "unspecified",
 ]);
 
+const PRIVATE_IP_RANGES = new Set(["loopback", "private", "uniqueLocal"]);
+
 export function isBlockedHostname(hostname: string) {
   const normalized = normalizeHostname(hostname);
   if (!normalized) return true;
@@ -63,7 +65,10 @@ export function stripIpv6Brackets(hostname: string) {
   return hostname;
 }
 
-export function isBlockedIpAddress(hostname: string) {
+export function isBlockedIpAddress(
+  hostname: string,
+  { allowPrivateRanges = false }: { allowPrivateRanges?: boolean } = {},
+) {
   const candidate = stripIpv6Brackets(hostname);
   if (
     looksLikeIpv4Address(candidate) &&
@@ -78,8 +83,9 @@ export function isBlockedIpAddress(hostname: string) {
 
   if (!ipaddr.isValid(candidate)) return false;
 
-  const address = ipaddr.process(candidate);
-  return BLOCKED_IP_RANGES.has(address.range());
+  const range = ipaddr.process(candidate).range();
+  if (allowPrivateRanges && PRIVATE_IP_RANGES.has(range)) return false;
+  return BLOCKED_IP_RANGES.has(range);
 }
 
 function looksLikeIpv4Address(hostname: string) {

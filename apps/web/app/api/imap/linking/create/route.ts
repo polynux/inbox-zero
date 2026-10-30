@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
+import { env } from "@/env";
 import { withAuth } from "@/utils/middleware";
 import { imapCredentialSchema } from "@/utils/actions/imap.validation";
 import { encryptToken } from "@/utils/encryption";
+import { validateImapHosts } from "@/utils/imap/host-validation";
 import prisma from "@/utils/prisma";
 
 export const POST = withAuth("imap/linking/create", async (request) => {
@@ -17,6 +19,17 @@ export const POST = withAuth("imap/linking/create", async (request) => {
   }
 
   const data = parsed.data;
+
+  const hostValidation = await validateImapHosts(
+    [data.imapHost, data.smtpHost],
+    {
+      allowPrivateHosts: env.IMAP_ALLOW_PRIVATE_HOSTS,
+    },
+  );
+  if (!hostValidation.valid) {
+    return NextResponse.json({ error: hostValidation.error }, { status: 400 });
+  }
+
   const normalizedEmail = data.email.trim().toLowerCase();
 
   // Check if email is already linked

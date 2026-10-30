@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isBlockedHostname } from "./host-policy";
+import { isBlockedHostname, isBlockedIpAddress } from "./host-policy";
 
 describe("isBlockedHostname", () => {
   it.each([
@@ -32,5 +32,34 @@ describe("isBlockedHostname", () => {
     ["[2606:4700:4700::1111]"],
   ])("allows public host %s", (hostname) => {
     expect(isBlockedHostname(hostname)).toBe(false);
+  });
+});
+
+describe("isBlockedIpAddress with allowPrivateRanges", () => {
+  it.each([
+    ["127.0.0.1"],
+    ["[::1]"],
+    ["[::ffff:127.0.0.1]"],
+    ["10.0.0.5"],
+    ["172.16.4.2"],
+    ["192.168.1.10"],
+    ["[fd12::1]"],
+  ])("allows loopback and private %s", (hostname) => {
+    expect(isBlockedIpAddress(hostname, { allowPrivateRanges: true })).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ["169.254.169.254"],
+    ["169.254.1.1"],
+    ["[fe80::1]"],
+    ["100.64.0.1"],
+    ["0.0.0.0"],
+    ["224.0.0.1"],
+  ])("still blocks %s", (hostname) => {
+    expect(isBlockedIpAddress(hostname, { allowPrivateRanges: true })).toBe(
+      true,
+    );
   });
 });

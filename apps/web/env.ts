@@ -246,6 +246,11 @@ const parsedEnv = createEnv({
     // Defaults to false. Only enable on a trusted, single-tenant self-hosted
     // deployment — never on a shared/multi-tenant instance.
     WEBHOOK_ALLOW_PRIVATE_IPS: booleanString.optional().default(false),
+    // SECURITY: lets IMAP/SMTP hosts point to loopback or private networks
+    // (e.g. Proton Mail Bridge on 127.0.0.1). Metadata and link-local addresses
+    // stay blocked. Defaults to false. Only enable on a trusted, single-tenant
+    // self-hosted deployment — never on a shared/multi-tenant instance.
+    IMAP_ALLOW_PRIVATE_HOSTS: booleanString.optional().default(false),
     DIGEST_MAX_SUMMARIES_PER_24H: z.coerce
       .number()
       .int()
