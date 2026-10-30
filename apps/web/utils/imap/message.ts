@@ -20,52 +20,6 @@ const IMAP_LABEL = {
   DRAFT: "DRAFT",
 } as const;
 
-export function buildImapLabelIds(options: {
-  flags?: Set<string> | string[];
-  folderPath?: string;
-  specialUse?: string;
-}): string[] {
-  const flags = options.flags ? [...options.flags] : [];
-  const labelIds: string[] = [];
-
-  if (!flags.includes("\\Seen")) labelIds.push(IMAP_LABEL.UNREAD);
-  if (flags.includes("\\Flagged")) labelIds.push(IMAP_LABEL.STARRED);
-  if (flags.includes("\\Draft")) labelIds.push(IMAP_LABEL.DRAFT);
-
-  const role = imapRoleLabel(options.folderPath, options.specialUse);
-  if (role) labelIds.push(role);
-
-  for (const flag of flags) {
-    if (flag.startsWith("\\") || labelIds.includes(flag)) continue;
-    labelIds.push(flag);
-  }
-
-  return labelIds;
-}
-
-function imapRoleLabel(
-  folderPath?: string,
-  specialUse?: string,
-): string | undefined {
-  const use = specialUse?.toLowerCase();
-  if (use === "\\trash") return IMAP_LABEL.TRASH;
-  if (use === "\\junk") return IMAP_LABEL.SPAM;
-  if (use === "\\sent") return IMAP_LABEL.SENT;
-  if (use === "\\drafts") return IMAP_LABEL.DRAFT;
-  if (use === "\\inbox") return IMAP_LABEL.INBOX;
-
-  const folder = folderPath?.toLowerCase();
-  if (!folder) return;
-  if (folder === "inbox") return IMAP_LABEL.INBOX;
-  if (folder.includes("trash") || folder.includes("deleted"))
-    return IMAP_LABEL.TRASH;
-  if (folder.includes("junk") || folder.includes("spam"))
-    return IMAP_LABEL.SPAM;
-  if (folder.includes("sent")) return IMAP_LABEL.SENT;
-  if (folder.includes("draft")) return IMAP_LABEL.DRAFT;
-  return;
-}
-
 /**
  * Fetch a single message by sequence number with full body content.
  */
@@ -441,4 +395,50 @@ function unquote(value: string): string {
   const end =
     value.length > 1 && value.endsWith('"') ? value.length - 1 : value.length;
   return value.slice(1, end);
+}
+
+export function buildImapLabelIds(options: {
+  flags?: Set<string> | string[];
+  folderPath?: string;
+  specialUse?: string;
+}): string[] {
+  const flags = options.flags ? [...options.flags] : [];
+  const labelIds: string[] = [];
+
+  if (!flags.includes("\\Seen")) labelIds.push(IMAP_LABEL.UNREAD);
+  if (flags.includes("\\Flagged")) labelIds.push(IMAP_LABEL.STARRED);
+  if (flags.includes("\\Draft")) labelIds.push(IMAP_LABEL.DRAFT);
+
+  const role = imapRoleLabel(options.folderPath, options.specialUse);
+  if (role) labelIds.push(role);
+
+  for (const flag of flags) {
+    if (flag.startsWith("\\") || labelIds.includes(flag)) continue;
+    labelIds.push(flag);
+  }
+
+  return labelIds;
+}
+
+function imapRoleLabel(
+  folderPath?: string,
+  specialUse?: string,
+): string | undefined {
+  const use = specialUse?.toLowerCase();
+  if (use === "\\trash") return IMAP_LABEL.TRASH;
+  if (use === "\\junk") return IMAP_LABEL.SPAM;
+  if (use === "\\sent") return IMAP_LABEL.SENT;
+  if (use === "\\drafts") return IMAP_LABEL.DRAFT;
+  if (use === "\\inbox") return IMAP_LABEL.INBOX;
+
+  const folder = folderPath?.toLowerCase();
+  if (!folder) return;
+  if (folder === "inbox") return IMAP_LABEL.INBOX;
+  if (folder.includes("trash") || folder.includes("deleted"))
+    return IMAP_LABEL.TRASH;
+  if (folder.includes("junk") || folder.includes("spam"))
+    return IMAP_LABEL.SPAM;
+  if (folder.includes("sent")) return IMAP_LABEL.SENT;
+  if (folder.includes("draft")) return IMAP_LABEL.DRAFT;
+  return;
 }
