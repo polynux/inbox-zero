@@ -1171,18 +1171,22 @@ ${messageContent}
       const sentFolder = await findSentFolder(client);
       if (!sentFolder) return false;
       await client.mailboxOpen(sentFolder, { readOnly: true });
-      // Exact-match first: substring SEARCH can hide the exact reply behind
-      // a newer substring hit when the window is sliced before filtering.
+      // Exact-match, newest first in chunks: substring SEARCH can hide the
+      // exact reply behind many newer substring hits, and fetching every
+      // candidate at once is wasteful when the reply is recent.
       const candidates = await searchImapMessages(client, {
         to: senderEmail,
       });
-      const uids = await filterUidsByExactAddress(
-        client,
-        candidates,
-        "to",
-        senderEmail,
-      );
-      return uids.length > 0;
+      for (let i = 0; i < candidates.length; i += 20) {
+        const uids = await filterUidsByExactAddress(
+          client,
+          candidates.slice(i, i + 20),
+          "to",
+          senderEmail,
+        );
+        if (uids.length > 0) return true;
+      }
+      return false;
     });
   }
 
@@ -1192,18 +1196,18 @@ ${messageContent}
   ): Promise<number> {
     return this.withConnection(async (client) => {
       await client.mailboxOpen("INBOX", { readOnly: true });
-      const candidates = await searchImapMessages(
-        client,
-        { from: senderEmail },
-        threshold,
-      );
+      const candidates = await searchImapMessages(client, {
+        from: senderEmail,
+      });
       const uids = await filterUidsByExactAddress(
         client,
         candidates,
         "from",
         senderEmail,
       );
-      return uids.length;
+      // Cap after the exact filter: capping first lets newer substring hits
+      // (joann@x.com for ann@x.com) fill the window and hide exact matches.
+      return Math.min(uids.length, threshold);
     });
   }
 

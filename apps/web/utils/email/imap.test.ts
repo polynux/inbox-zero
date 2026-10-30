@@ -686,6 +686,48 @@ describe("ImapProvider sender bulk actions", () => {
     expect(count).toBe(1);
   });
 
+  it("counts the exact sender even when a newer substring hit fills the cap", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "ann@x.com"),
+          message(2, "2026-01-02", "joann@x.com"),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).countReceivedMessages("ann@x.com", 1),
+    ).resolves.toBe(1);
+  });
+
+  it("finds the exact reply when it is older than a full chunk of substring hits", async () => {
+    const fake = createFakeClient([
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [
+          message(1, "2026-01-01", "me@example.com", "ann@x.com"),
+          ...Array.from({ length: 20 }, (_, index) =>
+            message(
+              2 + index,
+              `2026-02-${String(index + 1).padStart(2, "0")}`,
+              "me@example.com",
+              "joann@x.com",
+            ),
+          ),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).checkIfReplySent("ann@x.com"),
+    ).resolves.toBe(true);
+  });
+
   it("does not treat a substring recipient hit as a sent reply", async () => {
     const fake = createFakeClient([
       {
