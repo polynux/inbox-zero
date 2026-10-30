@@ -55,6 +55,7 @@ import { saveDraft } from "@/utils/imap/draft";
 import { sendSmtpEmail } from "@/utils/imap/mail";
 import { buildThreadId } from "@/utils/imap/thread";
 import { createScopedLogger } from "@/utils/logger";
+import { escapeHtml, textToHtmlParagraphs } from "@/utils/string";
 
 const defaultLogger = createScopedLogger("imap-provider");
 
@@ -900,17 +901,19 @@ export class ImapProvider implements EmailProvider {
       ? email.subject
       : `Fwd: ${email.subject}`;
 
+    const messageContent =
+      email.textHtml || textToHtmlParagraphs(email.textPlain);
+
     const forwardedBody = `
-${args.content || ""}
-<br/><br/>
+<div dir="ltr">${escapeHtml(args.content || "")}<br><br>
 ---------- Forwarded message ----------<br/>
-From: ${email.headers.from}<br/>
-Date: ${email.headers.date}<br/>
-Subject: ${email.headers.subject}<br/>
-To: ${email.headers.to}<br/>
+From: ${escapeHtml(email.headers.from)}<br/>
+Date: ${escapeHtml(email.headers.date)}<br/>
+Subject: ${escapeHtml(email.headers.subject)}<br/>
+To: ${escapeHtml(email.headers.to)}<br/>
 <br/>
-${email.textHtml || email.textPlain || ""}
-    `.trim();
+${messageContent}
+</div>`.trim();
 
     return sendSmtpEmail(this.config, {
       to: args.to,

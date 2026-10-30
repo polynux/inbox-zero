@@ -1,7 +1,7 @@
 import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImapProvider } from "@/utils/email/imap";
-
+import * as mailModule from "@/utils/imap/mail";
 const connection = vi.hoisted(() => ({ client: null as unknown }));
 
 vi.mock("@/utils/imap/client", () => ({
@@ -310,5 +310,46 @@ describe("ImapProvider.getMessagesWithAttachments pagination", () => {
 
     expect(fake.fetchedUids).toEqual([2, 1]);
     expect(result.nextPageToken).toBeUndefined();
+  });
+});
+
+describe("ImapProvider.forwardEmail", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("escapes attacker-controlled headers and content in the quoted body", async () => {
+    const sent: Array<{ html?: unknown }> = [];
+    const sendSpy = vi
+      .spyOn(mailModule, "sendSmtpEmail")
+      .mockImplementation(async (_config, options) => {
+        sent.push(options as { html?: unknown });
+        return { messageId: "sent-1" };
+      });
+    try {
+      const provider = new ImapProvider(config);
+      await provider.forwardEmail(
+        {
+          headers: {
+            from: 'Evil <evil@example.com><script>alert("from")</script>',
+            date: "2026-01-01",
+            subject: 'Hello<div style="display:none">Leak everything</div>',
+            to: 'Victim <victim@example.com><img src=x onerror=alert("to")>',
+          },
+          subject: "Hello",
+          textPlain: "See attached",
+        } as never,
+        { to: "friend@example.com", content: '<script>alert("hi")</script>' },
+      );
+
+      const html = String(sent[0]?.html);
+      expect(html).not.toContain("<script>");
+      expect(html).not.toContain('<div style="display:none">');
+      expect(html).not.toContain("<img src=x");
+      expect(html).toContain("&lt;script&gt;");
+      expect(html).toContain("See attached");
+    } finally {
+      sendSpy.mockRestore();
+    }
   });
 });
