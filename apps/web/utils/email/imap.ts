@@ -515,6 +515,7 @@ export class ImapProvider implements EmailProvider {
 
   async deleteLabel(labelId: string): Promise<void> {
     return this.withConnection(async (client) => {
+      await assertDeletableFolder(client, labelId);
       await client.mailboxDelete(labelId);
     });
   }
@@ -1416,6 +1417,7 @@ ${messageContent}
 
   async deleteFolder(folderId: string): Promise<void> {
     return this.withConnection(async (client) => {
+      await assertDeletableFolder(client, folderId);
       await client.mailboxDelete(folderId);
     });
   }
@@ -1579,4 +1581,29 @@ function parseImapUid(id: string, what: string): number {
   if (!/^[1-9]\d*$/.test(id))
     throw new SafeError(`${what} must be a positive integer UID`);
   return Number(id);
+}
+
+const PROTECTED_SPECIAL_USE = new Set([
+  "\\Sent",
+  "\\Trash",
+  "\\Drafts",
+  "\\Junk",
+  "\\Archive",
+  "\\All",
+]);
+
+async function assertDeletableFolder(
+  client: ImapFlow,
+  folderId: string,
+): Promise<void> {
+  if (folderId.toLowerCase() === "inbox")
+    throw new SafeError("INBOX cannot be deleted");
+  const mailboxes = await client.list();
+  const mailbox = mailboxes.find(
+    (mb) => mb.path.toLowerCase() === folderId.toLowerCase(),
+  );
+  if (mailbox?.specialUse && PROTECTED_SPECIAL_USE.has(mailbox.specialUse))
+    throw new SafeError(
+      `Special-use mailbox ${mailbox.specialUse} cannot be deleted`,
+    );
 }

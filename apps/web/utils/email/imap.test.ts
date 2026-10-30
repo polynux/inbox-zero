@@ -312,6 +312,63 @@ describe("ImapProvider draft id validation", () => {
   });
 });
 
+describe("ImapProvider protected folder deletion", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it.each([
+    "INBOX",
+    "inbox",
+  ])("refuses deleteFolder(%s) without touching the server", async (folderId) => {
+    const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
+    fake.client.mailboxDelete = vi.fn();
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).deleteFolder(folderId),
+    ).rejects.toThrow(/INBOX/i);
+    expect(fake.client.mailboxDelete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["\\Sent"],
+    ["\\Trash"],
+    ["\\Drafts"],
+    ["\\Junk"],
+    ["\\Archive"],
+  ])("refuses deleteFolder on special-use %s without touching the server", async (specialUse) => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [] },
+      { path: "Some Folder", specialUse, messages: [] },
+    ]);
+    fake.client.mailboxDelete = vi.fn();
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).deleteFolder("Some Folder"),
+    ).rejects.toThrow(/special-use|protected/i);
+    expect(fake.client.mailboxDelete).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "INBOX",
+    "Some Folder",
+  ])("refuses deleteLabel(%s) without touching the server", async (labelId) => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [] },
+      { path: "Some Folder", specialUse: "\\Sent", messages: [] },
+    ]);
+    fake.client.mailboxDelete = vi.fn();
+    connection.client = fake.client;
+
+    await expect(new ImapProvider(config).deleteLabel(labelId)).rejects.toThrow(
+      /INBOX|special-use|protected/i,
+    );
+    expect(fake.client.mailboxDelete).not.toHaveBeenCalled();
+  });
+});
+
 describe("ImapProvider.getMessagesWithAttachments pagination", () => {
   beforeEach(() => {
     connection.client = null;
