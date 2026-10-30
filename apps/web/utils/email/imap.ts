@@ -53,7 +53,7 @@ import {
 } from "@/utils/imap/folder";
 import { saveDraft } from "@/utils/imap/draft";
 import { sendSmtpEmail } from "@/utils/imap/mail";
-import { buildThreadId } from "@/utils/imap/thread";
+import { buildThreadId, getAllThreadMessageIds } from "@/utils/imap/thread";
 import { SafeError } from "@/utils/error";
 import { extractEmailAddress, splitRecipientList } from "@/utils/email";
 import { createScopedLogger } from "@/utils/logger";
@@ -297,17 +297,13 @@ export class ImapProvider implements EmailProvider {
   }
 
   async getThreadMessages(threadId: string): Promise<ParsedMessage[]> {
-    return this.withConnection(async (client) => {
-      const mailbox = await client.mailboxOpen("INBOX", { readOnly: true });
-      // Use sequence range fetch (single IMAP command) instead of
-      // fetching UIDs one-by-one which is slow on WorkMail
-      const messages = await fetchRecentMessages(client, mailbox, 200);
-      return messages
-        .filter((m) => m.threadId === threadId)
-        .sort(
-          (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
-        );
-    });
+    const messages = await this.withConnection((client) =>
+      fetchThreadMessages(client, threadId),
+    );
+    if (messages.length === 0) throw new Error(`Thread ${threadId} not found`);
+    return messages.sort(
+      (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
+    );
   }
 
   async getThreadMessagesInInbox(threadId: string): Promise<ParsedMessage[]> {
@@ -559,7 +555,6 @@ export class ImapProvider implements EmailProvider {
 
   async archiveThread(threadId: string, _ownerEmail: string): Promise<void> {
     const messages = await this.getThreadMessages(threadId);
-    if (messages.length === 0) return;
 
     return this.withConnection(async (client) => {
       await client.mailboxOpen("INBOX");
@@ -606,7 +601,6 @@ export class ImapProvider implements EmailProvider {
     _actionSource: "user" | "automation",
   ): Promise<void> {
     const messages = await this.getThreadMessages(threadId);
-    if (messages.length === 0) return;
 
     return this.withConnection(async (client) => {
       await client.mailboxOpen("INBOX");
@@ -1679,4 +1673,85 @@ async function filterUidsByExactAddress(
       );
     })
     .map((message) => Number(message.id));
+}
+
+/**
+ * Resolve every message of a thread across the whole account. A thread id
+ * is the hash of its root Message-ID, so SEARCH the Message-ID, References
+ * and In-Reply-To headers for any member, follow each hit's reference chain
+ * to the other members, and fetch them wherever they live. Members found by
+ * an exact thread-id match are exact; header SEARCH is substring-based, so
+ * candidates are re-verified before acting on them.
+ */
+async function fetchThreadMessages(
+  client: ImapFlow,
+  threadId: string,
+): Promise<ParsedMessage[]> {
+  const folders = await resolveSearchFolders(client);
+  const byUid = new Map<string, ParsedMessage>();
+
+  for (const folder of folders) {
+    await client.mailboxOpen(folder, { readOnly: true });
+    // One scan per folder: the thread id is only computable from the
+    // References/In-Reply-To/Message-ID headers, which SEARCH cannot see,
+    // so fetch envelopes and match locally. Newest 200 covers active
+    // threads; older members are picked up via their references below.
+    const recent = await fetchRecentMessages(client, client.mailbox, 200);
+    for (const message of recent) {
+      if (message.threadId === threadId) byUid.set(message.id, message);
+    }
+  }
+
+  // Follow reference chains: a member's headers name the other members'
+  // Message-IDs, so SEARCH for those IDs to find members the scan missed
+  // (older than the 200 window, or archived/trashed elsewhere).
+  const wantedMessageIds = new Set<string>();
+  for (const message of byUid.values()) {
+    for (const id of getAllThreadMessageIds(
+      message.headers.references,
+      message.headers["in-reply-to"],
+      message.headers["message-id"],
+    )) {
+      wantedMessageIds.add(id);
+    }
+  }
+
+  for (const folder of folders) {
+    await client.mailboxOpen(folder, { readOnly: true });
+    for (const messageId of wantedMessageIds) {
+      const candidates = await searchImapMessages(client, {
+        or: [
+          { header: { "Message-ID": messageId } },
+          { header: { References: messageId } },
+          { header: { "In-Reply-To": messageId } },
+        ],
+      });
+      const verified = await filterThreadCandidates(
+        client,
+        candidates,
+        threadId,
+      );
+      for (const message of verified) {
+        byUid.set(message.id, message);
+        for (const id of getAllThreadMessageIds(
+          message.headers.references,
+          message.headers["in-reply-to"],
+          message.headers["message-id"],
+        )) {
+          wantedMessageIds.add(id);
+        }
+      }
+    }
+  }
+
+  return [...byUid.values()];
+}
+
+async function filterThreadCandidates(
+  client: ImapFlow,
+  uids: number[],
+  threadId: string,
+): Promise<ParsedMessage[]> {
+  const messages = await fetchMessagesByUids(client, uids);
+  return messages.filter((message) => message.threadId === threadId);
 }

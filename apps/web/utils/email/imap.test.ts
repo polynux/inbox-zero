@@ -78,6 +78,7 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       const mailbox = mailboxes.find((candidate) => candidate.path === path);
       if (!mailbox) throw new Error(`mailbox ${path} not found`);
       current = mailbox;
+      client.mailbox = { path };
       opened.push(path);
       return { exists: mailbox.messages.length };
     }),
@@ -496,18 +497,13 @@ describe("ImapProvider sender bulk actions", () => {
     });
     // SEARCH {from} returns candidate UIDs (substring match, like a server);
     // UID->sequence lookups resolve against the real mailbox contents.
-    fake.client.search = vi.fn(
-      async (
-        criteria: Record<string, unknown>,
-        options?: { uid?: boolean },
-      ) => {
-        if (criteria.uid !== undefined) {
-          const index = [1, 2, 3].indexOf(Number(criteria.uid)) + 1;
-          return index > 0 ? [index] : [];
-        }
-        return [1, 2, 3];
-      },
-    );
+    fake.client.search = vi.fn(async (criteria: Record<string, unknown>) => {
+      if (criteria.uid !== undefined) {
+        const index = [1, 2, 3].indexOf(Number(criteria.uid)) + 1;
+        return index > 0 ? [index] : [];
+      }
+      return [1, 2, 3];
+    });
     connection.client = fake.client;
 
     await new ImapProvider(config).bulkArchiveFromSenders(
@@ -529,18 +525,13 @@ describe("ImapProvider sender bulk actions", () => {
         ],
       },
     ]);
-    fake.client.search = vi.fn(
-      async (
-        criteria: Record<string, unknown>,
-        options?: { uid?: boolean },
-      ) => {
-        if (criteria.uid !== undefined) {
-          const index = [1, 2].indexOf(Number(criteria.uid)) + 1;
-          return index > 0 ? [index] : [];
-        }
-        return [1, 2];
-      },
-    );
+    fake.client.search = vi.fn(async (criteria: Record<string, unknown>) => {
+      if (criteria.uid !== undefined) {
+        const index = [1, 2].indexOf(Number(criteria.uid)) + 1;
+        return index > 0 ? [index] : [];
+      }
+      return [1, 2];
+    });
     connection.client = fake.client;
 
     const count = await new ImapProvider(config).countReceivedMessages(
@@ -559,17 +550,12 @@ describe("ImapProvider sender bulk actions", () => {
         messages: [message(9, "2026-01-01", "me@example.com", "joann@x.com")],
       },
     ]);
-    fake.client.search = vi.fn(
-      async (
-        criteria: Record<string, unknown>,
-        options?: { uid?: boolean },
-      ) => {
-        if (criteria.uid !== undefined) {
-          return Number(criteria.uid) === 9 ? [1] : [];
-        }
-        return [9];
-      },
-    );
+    fake.client.search = vi.fn(async (criteria: Record<string, unknown>) => {
+      if (criteria.uid !== undefined) {
+        return Number(criteria.uid) === 9 ? [1] : [];
+      }
+      return [9];
+    });
     connection.client = fake.client;
 
     await expect(
@@ -590,5 +576,20 @@ describe("ImapProvider sender bulk actions", () => {
         headers: { from: "Me <joann@x.com>" },
       } as never),
     ).toBe(true);
+  });
+});
+
+describe("ImapProvider unknown threads", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("archiveThread throws instead of silently succeeding", async () => {
+    const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).archiveThread("no-such-thread", "owner@x.com"),
+    ).rejects.toThrow(/not found/i);
   });
 });
