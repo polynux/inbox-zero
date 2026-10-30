@@ -20,18 +20,18 @@ export async function saveDraft(
   const draftsFolder = await findDraftsFolder(client);
 
   const messageParts: string[] = [
-    `From: ${options.from}`,
-    `To: ${options.to}`,
-    `Subject: ${options.subject}`,
+    `From: ${stripHeaderBreaks(options.from)}`,
+    `To: ${stripHeaderBreaks(options.to)}`,
+    `Subject: ${stripHeaderBreaks(options.subject)}`,
     `Date: ${new Date().toUTCString()}`,
     "MIME-Version: 1.0",
   ];
 
   if (options.inReplyTo) {
-    messageParts.push(`In-Reply-To: ${options.inReplyTo}`);
+    messageParts.push(`In-Reply-To: ${stripHeaderBreaks(options.inReplyTo)}`);
   }
   if (options.references) {
-    messageParts.push(`References: ${options.references}`);
+    messageParts.push(`References: ${stripHeaderBreaks(options.references)}`);
   }
 
   if (options.html) {
@@ -59,4 +59,9 @@ export async function saveDraft(
     : result.uidValidity
       ? String(result.uidValidity)
       : "unknown";
+}
+
+// A raw CR, LF or NUL in a header value would start a new header line.
+function stripHeaderBreaks(value: string) {
+  return value.replace(/[\r\n\0]/g, "");
 }
