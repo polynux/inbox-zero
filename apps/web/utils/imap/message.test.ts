@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseSearchQuery } from "@/utils/imap/message";
-
+import { convertImapMessage, parseSearchQuery } from "@/utils/imap/message";
 describe("parseSearchQuery", () => {
   it("parses from: query", () => {
     const result = parseSearchQuery("from:test@example.com");
@@ -74,5 +73,90 @@ describe("parseSearchQuery", () => {
     expect(parseSearchQuery('"exact phrase')).toEqual({
       body: "exact phrase",
     });
+  });
+});
+
+describe("convertImapMessage attachments", () => {
+  const baseMessage = {
+    uid: 42,
+    envelope: {
+      date: new Date("2026-01-01"),
+      subject: "Files",
+      from: [{ address: "sender@example.com" }],
+      to: [],
+    },
+    flags: new Set<string>(),
+  };
+
+  it("populates attachment metadata from bodyStructure without fetching content", async () => {
+    const parsed = await convertImapMessage({
+      ...baseMessage,
+      bodyStructure: {
+        type: "multipart/mixed",
+        childNodes: [
+          { type: "text/plain", part: "1", size: 100 },
+          {
+            type: "application/pdf",
+            part: "2",
+            size: 12_345,
+            disposition: "attachment",
+            dispositionParameters: { filename: "report.pdf" },
+          },
+        ],
+      },
+    } as never);
+
+    expect(parsed?.attachments).toEqual([
+      {
+        attachmentId: "2",
+        filename: "report.pdf",
+        mimeType: "application/pdf",
+        size: 12_345,
+        headers: {
+          "content-description": "",
+          "content-disposition": "attachment",
+          "content-id": "",
+          "content-transfer-encoding": "",
+          "content-type": "application/pdf",
+        },
+      },
+    ]);
+    expect(parsed?.hasAttachment).toBe(true);
+  });
+
+  it("treats a named part as an attachment and an inline part as inline", async () => {
+    const parsed = await convertImapMessage({
+      ...baseMessage,
+      bodyStructure: {
+        type: "multipart/related",
+        childNodes: [
+          {
+            type: "image/png",
+            part: "2",
+            size: 500,
+            disposition: "inline",
+            id: "<logo@example.com>",
+            parameters: { name: "logo.png" },
+          },
+          {
+            type: "application/zip",
+            part: "3",
+            size: 999,
+            parameters: { name: "files.zip" },
+          },
+        ],
+      },
+    } as never);
+
+    expect(parsed?.attachments?.map((a) => a.filename)).toEqual(["files.zip"]);
+    expect(parsed?.inline.map((a) => a.attachmentId)).toEqual(["2"]);
+  });
+
+  it("leaves messages without a bodyStructure attachment-free", async () => {
+    const parsed = await convertImapMessage({ ...baseMessage } as never);
+
+    expect(parsed?.attachments).toBeUndefined();
+    expect(parsed?.hasAttachment).toBeUndefined();
+    expect(parsed?.inline).toEqual([]);
   });
 });

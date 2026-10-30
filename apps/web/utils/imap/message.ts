@@ -1,4 +1,9 @@
-import type { ImapFlow, FetchMessageObject, MailboxObject } from "imapflow";
+import type {
+  ImapFlow,
+  FetchMessageObject,
+  MailboxObject,
+  MessageStructureObject,
+} from "imapflow";
 import { simpleParser } from "mailparser";
 import type { ParsedMessage, ParsedMessageHeaders } from "@/utils/types";
 import { buildThreadId } from "@/utils/imap/thread";
@@ -14,6 +19,7 @@ export async function fetchMessageBySeq(
     uid: true,
     envelope: true,
     flags: true,
+    bodyStructure: true,
   });
 
   if (!msg) return null;
@@ -41,6 +47,7 @@ export async function fetchMessageByUid(
       uid: true,
       envelope: true,
       flags: true,
+      bodyStructure: true,
     });
     if (!msg) return null;
 
@@ -71,6 +78,7 @@ export async function fetchRecentMessages(
     uid: true,
     envelope: true,
     flags: true,
+    bodyStructure: true,
   })) {
     const parsed = await convertImapMessage(msg);
     if (parsed) messages.push(parsed);
@@ -108,6 +116,7 @@ export async function fetchMessagesByUids(
         uid: true,
         envelope: true,
         flags: true,
+        bodyStructure: true,
       });
       if (msg) {
         const parsed = await convertImapMessage(msg);
@@ -237,6 +246,8 @@ export async function convertImapMessage(
       ? textPlain.slice(0, 200).replace(/\n/g, " ")
       : envelope.subject || "";
 
+    const { attachments, inline } = extractAttachments(msg.bodyStructure);
+
     return {
       id: String(msg.uid),
       threadId,
@@ -248,12 +259,61 @@ export async function convertImapMessage(
       textHtml,
       textPlain,
       labelIds,
-      inline: [],
+      attachments: attachments.length > 0 ? attachments : undefined,
+      hasAttachment: attachments.length > 0 ? true : undefined,
+      inline,
       ...(inReplyTo && { internalDate: date }),
     };
   } catch {
     return null;
   }
+}
+
+// Walk an imapflow BODYSTRUCTURE tree and collect attachment metadata
+// (filename, MIME type, size, part id). Content bytes stay on the server:
+// callers that need them use download/getAttachment on the part id.
+function extractAttachments(structure?: MessageStructureObject): {
+  attachments: ParsedMessage["attachments"];
+  inline: ParsedMessage["inline"];
+} {
+  const attachments: NonNullable<ParsedMessage["attachments"]> = [];
+  const inline: NonNullable<ParsedMessage["inline"]> = [];
+
+  if (!structure) return { attachments: [], inline: [] };
+
+  const visit = (node: MessageStructureObject) => {
+    for (const child of node.childNodes || []) visit(child);
+
+    if (node.childNodes?.length) return;
+
+    const disposition = node.disposition?.toLowerCase();
+    const filename =
+      node.dispositionParameters?.filename || node.parameters?.name;
+    const isInline = disposition === "inline";
+    const isAttachment =
+      disposition === "attachment" || (!!filename && !isInline);
+    if (!isAttachment && !isInline) return;
+
+    const entry = {
+      attachmentId: node.part || "",
+      filename: filename || `part-${node.part || "1"}`,
+      mimeType: node.type || "application/octet-stream",
+      size: node.size || 0,
+      headers: {
+        "content-description": node.description || "",
+        "content-disposition": node.disposition || "",
+        "content-id": node.id || "",
+        "content-transfer-encoding": node.encoding || "",
+        "content-type": node.type || "",
+      },
+    };
+
+    if (isInline) inline.push(entry);
+    else attachments.push(entry);
+  };
+
+  visit(structure);
+  return { attachments, inline };
 }
 
 function formatAddress(
