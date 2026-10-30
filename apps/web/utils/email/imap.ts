@@ -143,42 +143,22 @@ export class ImapProvider implements EmailProvider {
     unreadOnly?: boolean;
   }): Promise<{ messages: ParsedMessage[]; nextPageToken?: string }> {
     return this.withConnection(async (client) => {
-      const folder = options.inboxOnly !== false ? "INBOX" : "INBOX";
-      const mailbox = await client.mailboxOpen(folder, { readOnly: true });
-      const total = mailbox.exists || 0;
+      const folders =
+        options.inboxOnly === false
+          ? await resolveSearchFolders(client)
+          : ["INBOX"];
 
       const maxResults = options.maxResults || 20;
       const offset = options.pageToken ? Number(options.pageToken) : 0;
-
-      // For simple listing without query, use sequence numbers (most reliable)
-      if (
+      // Fetch the newest window from every folder so the merged page is
+      // identical to the page a single global mailbox would return.
+      const window = offset + maxResults;
+      const simpleListing =
         !options.query &&
         !options.before &&
         !options.after &&
-        !options.unreadOnly
-      ) {
-        const end = Math.max(1, total - offset);
-        const start = Math.max(1, end - maxResults + 1);
-        if (end < 1) return { messages: [] };
+        !options.unreadOnly;
 
-        const messages: ParsedMessage[] = [];
-        for await (const msg of client.fetch(`${start}:${end}`, {
-          uid: true,
-          envelope: true,
-          flags: true,
-        })) {
-          const parsed = await convertImapMessage(msg);
-          if (parsed) messages.push(parsed);
-        }
-        messages.reverse();
-
-        const nextOffset = offset + maxResults;
-        const nextPageToken =
-          nextOffset < total ? String(nextOffset) : undefined;
-        return { messages, nextPageToken };
-      }
-
-      // For queries, use IMAP SEARCH then fetch by UID
       const criteria: Record<string, unknown> = {};
       if (options.query) {
         Object.assign(criteria, parseSearchQuery(options.query));
@@ -189,13 +169,46 @@ export class ImapProvider implements EmailProvider {
       if (options.after) criteria.since = options.after;
       if (options.unreadOnly) criteria.unseen = true;
 
-      const allUids = await searchImapMessages(client, criteria);
-      const pageUids = allUids.slice(offset, offset + maxResults);
-      const messages = await fetchMessagesByUids(client, pageUids);
+      const collected: ParsedMessage[] = [];
+      let hasMore = false;
 
-      const nextOffset = offset + maxResults;
+      for (const folder of folders) {
+        const mailbox = await client.mailboxOpen(folder, { readOnly: true });
+
+        // For simple listing without query, use sequence numbers (most reliable)
+        if (simpleListing) {
+          const total = mailbox.exists || 0;
+          if (total > window) hasMore = true;
+          if (total === 0) continue;
+
+          const start = Math.max(1, total - window + 1);
+          for await (const msg of client.fetch(`${start}:${total}`, {
+            uid: true,
+            envelope: true,
+            flags: true,
+          })) {
+            const parsed = await convertImapMessage(msg);
+            if (parsed) collected.push(parsed);
+          }
+          continue;
+        }
+
+        // For queries, use IMAP SEARCH then fetch by UID
+        const allUids = await searchImapMessages(client, criteria);
+        if (allUids.length > window) hasMore = true;
+        const messages = await fetchMessagesByUids(
+          client,
+          allUids.slice(0, window),
+        );
+        collected.push(...messages);
+      }
+
+      collected.sort(
+        (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+      );
+      const messages = collected.slice(offset, offset + maxResults);
       const nextPageToken =
-        nextOffset < allUids.length ? String(nextOffset) : undefined;
+        hasMore || collected.length > window ? String(window) : undefined;
 
       return { messages, nextPageToken };
     });
@@ -1518,4 +1531,25 @@ ${email.textHtml || email.textPlain || ""}
   async unwatchEmails(_subscriptionId?: string): Promise<void> {
     // No-op for IMAP
   }
+}
+
+/**
+ * Mailboxes a whole-account IMAP search should cover.
+ * Proton Bridge exposes every message through its `\All` mailbox, so search
+ * that instead of re-reading each folder; otherwise use every selectable
+ * mailbox except the trash, junk and drafts special-use folders.
+ */
+async function resolveSearchFolders(client: ImapFlow): Promise<string[]> {
+  const mailboxes = await client.list();
+
+  const allMail = mailboxes.find((mb) => mb.specialUse === "\\All");
+  if (allMail) return [allMail.path];
+
+  const skippedSpecialUse = new Set(["\\Trash", "\\Junk", "\\Drafts"]);
+  const paths = mailboxes
+    .filter((mb) => mb.listed && !mb.flags.has("\\Noselect"))
+    .filter((mb) => !mb.specialUse || !skippedSpecialUse.has(mb.specialUse))
+    .map((mb) => mb.path);
+
+  return paths.length > 0 ? paths : ["INBOX"];
 }
