@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { Prisma } from "@/generated/prisma/client";
 import prisma from "@/utils/__mocks__/prisma";
 
 vi.mock("@/utils/prisma");
@@ -102,5 +103,21 @@ describe("POST /api/imap/linking/create", () => {
 
     expect(response.status).toBe(200);
     expect(prisma.account.create).toHaveBeenCalledOnce();
+  });
+
+  it("returns 409 when a concurrent request links the same email first", async () => {
+    prisma.account.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError(
+        "Unique constraint failed on the fields: (`providerAccountId`)",
+        { code: "P2002", clientVersion: "test" },
+      ),
+    );
+
+    const response = await postLinkingCreate(validBody);
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: "This email is already linked to an account",
+    });
   });
 });

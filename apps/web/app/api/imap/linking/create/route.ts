@@ -4,6 +4,7 @@ import { withAuth } from "@/utils/middleware";
 import { imapCredentialSchema } from "@/utils/actions/imap.validation";
 import { encryptToken } from "@/utils/encryption";
 import { validateImapHosts } from "@/utils/imap/host-validation";
+import { isDuplicateError } from "@/utils/prisma-helpers";
 import prisma from "@/utils/prisma";
 
 export const POST = withAuth("imap/linking/create", async (request) => {
@@ -61,39 +62,50 @@ export const POST = withAuth("imap/linking/create", async (request) => {
   }
 
   // Create Account + ImapCredential + EmailAccount in a single transaction
-  const result = await prisma.account.create({
-    data: {
-      userId,
-      provider: "imap",
-      providerAccountId: normalizedEmail,
-      type: "credential",
-      imapCredential: {
-        create: {
-          imapHost: data.imapHost,
-          imapPort: data.imapPort,
-          imapSecurity: data.imapSecurity,
-          smtpHost: data.smtpHost,
-          smtpPort: data.smtpPort,
-          smtpSecurity: data.smtpSecurity,
-          username: data.username,
-          password: encryptedPassword,
+  try {
+    const result = await prisma.account.create({
+      data: {
+        userId,
+        provider: "imap",
+        providerAccountId: normalizedEmail,
+        type: "credential",
+        imapCredential: {
+          create: {
+            imapHost: data.imapHost,
+            imapPort: data.imapPort,
+            imapSecurity: data.imapSecurity,
+            smtpHost: data.smtpHost,
+            smtpPort: data.smtpPort,
+            smtpSecurity: data.smtpSecurity,
+            username: data.username,
+            password: encryptedPassword,
+          },
+        },
+        emailAccount: {
+          create: {
+            email: normalizedEmail,
+            name: data.name || normalizedEmail.split("@")[0],
+            userId,
+          },
         },
       },
-      emailAccount: {
-        create: {
-          email: normalizedEmail,
-          name: data.name || normalizedEmail.split("@")[0],
-          userId,
-        },
+      include: {
+        emailAccount: { select: { id: true, email: true } },
       },
-    },
-    include: {
-      emailAccount: { select: { id: true, email: true } },
-    },
-  });
+    });
 
-  return NextResponse.json({
-    emailAccountId: result.emailAccount?.id,
-    email: result.emailAccount?.email,
-  });
+    return NextResponse.json({
+      emailAccountId: result.emailAccount?.id,
+      email: result.emailAccount?.email,
+    });
+  } catch (error) {
+    // A concurrent request can pass the lookup above and then hit the unique index.
+    if (isDuplicateError(error)) {
+      return NextResponse.json(
+        { error: "This email is already linked to an account" },
+        { status: 409 },
+      );
+    }
+    throw error;
+  }
 });
