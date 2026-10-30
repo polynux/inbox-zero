@@ -340,7 +340,7 @@ describe("header-less threads resolve without a full scan", () => {
       undefined,
       undefined,
       undefined,
-      "INBOX:9",
+      encodeImapMessageId("INBOX", 9),
     );
     const messages = await new ImapProvider(config).getThreadMessages(
       listedThreadId,

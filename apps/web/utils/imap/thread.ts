@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
-import { SafeError } from "@/utils/error";
+import { parseImapMessageId } from "@/utils/imap/message-id";
 
 // Prefix for thread ids of header-less messages. The id carries the
-// `folder:uid` listing key verbatim (not hashed) so the owning message can be
-// derived back from the thread id without scanning every mailbox.
+// folder-qualified listing key (`uid@base64url(folder)`, the same key as a
+// message id) so the owning message can be derived back from the thread id
+// without scanning every mailbox.
 const FALLBACK_THREAD_PREFIX = "fallback:";
 
 /**
@@ -120,8 +121,8 @@ export function getAllThreadMessageIds(
 }
 
 /**
- * Recover the `folder:uid` listing key carried by a header-less thread id.
- * Returns null for header-derived (hashed) thread ids. Rejects malformed
+ * Recover the folder-qualified listing key carried by a header-less thread
+ * id. Returns null for header-derived (hashed) thread ids. Rejects malformed
  * keys so callers never fetch or act on a fabricated folder.
  */
 export function parseFallbackThreadId(threadId: string): {
@@ -129,15 +130,5 @@ export function parseFallbackThreadId(threadId: string): {
   uid: number;
 } | null {
   if (!threadId.startsWith(FALLBACK_THREAD_PREFIX)) return null;
-  const key = threadId.slice(FALLBACK_THREAD_PREFIX.length);
-  const colon = key.lastIndexOf(":");
-  if (colon <= 0 || colon === key.length - 1) {
-    throw new SafeError("Header-less thread id holds a malformed key");
-  }
-  const folder = key.slice(0, colon);
-  const uidText = key.slice(colon + 1);
-  if (!/^[1-9]\d*$/.test(uidText)) {
-    throw new SafeError("Header-less thread id holds an invalid UID");
-  }
-  return { folder, uid: Number(uidText) };
+  return parseImapMessageId(threadId.slice(FALLBACK_THREAD_PREFIX.length));
 }

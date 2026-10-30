@@ -1763,10 +1763,10 @@ async function fetchThreadMessages(
   threadId: string,
   options?: { includeTrashAndJunk?: boolean },
 ): Promise<ParsedMessage[]> {
-  // Header-less messages keep their `folder:uid` listing key in the thread
-  // id, so the owning message is fetchable directly — no scan needed, and
-  // on Proton (where only `\All` is scanned) the key still names the folder
-  // the caller originally listed.
+  // Header-less messages keep their folder-qualified listing key
+  // (`uid@base64url(folder)`) in the thread id, so the owning message is
+  // fetchable directly — no scan needed, and on Proton (where only `\All` is
+  // scanned) the key still names the folder the caller originally listed.
   const fallback = parseFallbackThreadId(threadId);
   if (fallback) {
     await client.mailboxOpen(fallback.folder, { readOnly: true });

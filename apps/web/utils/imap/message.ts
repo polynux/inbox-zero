@@ -228,8 +228,10 @@ export async function searchImapMessages(
  */
 export async function convertImapMessage(
   msg: FetchMessageObject,
-  body?: { textHtml?: string; textPlain?: string; references?: string },
-  folderPath?: string,
+  body:
+    | { textHtml?: string; textPlain?: string; references?: string }
+    | undefined,
+  folderPath: string,
   specialUse?: string,
 ): Promise<ParsedMessage | null> {
   try {
@@ -267,8 +269,9 @@ export async function convertImapMessage(
       ? new Date(envelope.date).toISOString()
       : new Date().toISOString();
 
-    const fallbackKey =
-      folderPath && msg.uid ? `${folderPath}:${msg.uid}` : undefined;
+    const fallbackKey = msg.uid
+      ? encodeImapMessageId(folderPath, msg.uid)
+      : undefined;
     const threadId = buildThreadId(
       references,
       inReplyTo,
@@ -298,13 +301,9 @@ export async function convertImapMessage(
     const { attachments, inline } = extractAttachments(msg.bodyStructure);
 
     return {
-      id:
-        folderPath && msg.uid
-          ? encodeImapMessageId(folderPath, msg.uid)
-          : String(msg.uid),
+      id: msg.uid ? encodeImapMessageId(folderPath, msg.uid) : String(msg.uid),
       threadId,
-      historyId:
-        folderPath && msg.uid ? `${folderPath}:${msg.uid}` : String(msg.uid),
+      historyId: msg.uid ? `${folderPath}:${msg.uid}` : String(msg.uid),
       date,
       headers,
       subject: envelope.subject || "(no subject)",

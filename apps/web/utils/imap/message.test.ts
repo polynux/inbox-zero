@@ -89,22 +89,26 @@ describe("convertImapMessage attachments", () => {
   };
 
   it("populates attachment metadata from bodyStructure without fetching content", async () => {
-    const parsed = await convertImapMessage({
-      ...baseMessage,
-      bodyStructure: {
-        type: "multipart/mixed",
-        childNodes: [
-          { type: "text/plain", part: "1", size: 100 },
-          {
-            type: "application/pdf",
-            part: "2",
-            size: 12_345,
-            disposition: "attachment",
-            dispositionParameters: { filename: "report.pdf" },
-          },
-        ],
-      },
-    } as never);
+    const parsed = await convertImapMessage(
+      {
+        ...baseMessage,
+        bodyStructure: {
+          type: "multipart/mixed",
+          childNodes: [
+            { type: "text/plain", part: "1", size: 100 },
+            {
+              type: "application/pdf",
+              part: "2",
+              size: 12_345,
+              disposition: "attachment",
+              dispositionParameters: { filename: "report.pdf" },
+            },
+          ],
+        },
+      } as never,
+      undefined,
+      "INBOX",
+    );
 
     expect(parsed?.attachments).toEqual([
       {
@@ -125,35 +129,43 @@ describe("convertImapMessage attachments", () => {
   });
 
   it("treats a named part as an attachment and an inline part as inline", async () => {
-    const parsed = await convertImapMessage({
-      ...baseMessage,
-      bodyStructure: {
-        type: "multipart/related",
-        childNodes: [
-          {
-            type: "image/png",
-            part: "2",
-            size: 500,
-            disposition: "inline",
-            id: "<logo@example.com>",
-            parameters: { name: "logo.png" },
-          },
-          {
-            type: "application/zip",
-            part: "3",
-            size: 999,
-            parameters: { name: "files.zip" },
-          },
-        ],
-      },
-    } as never);
+    const parsed = await convertImapMessage(
+      {
+        ...baseMessage,
+        bodyStructure: {
+          type: "multipart/related",
+          childNodes: [
+            {
+              type: "image/png",
+              part: "2",
+              size: 500,
+              disposition: "inline",
+              id: "<logo@example.com>",
+              parameters: { name: "logo.png" },
+            },
+            {
+              type: "application/zip",
+              part: "3",
+              size: 999,
+              parameters: { name: "files.zip" },
+            },
+          ],
+        },
+      } as never,
+      undefined,
+      "INBOX",
+    );
 
     expect(parsed?.attachments?.map((a) => a.filename)).toEqual(["files.zip"]);
     expect(parsed?.inline.map((a) => a.attachmentId)).toEqual(["2"]);
   });
 
   it("leaves messages without a bodyStructure attachment-free", async () => {
-    const parsed = await convertImapMessage({ ...baseMessage } as never);
+    const parsed = await convertImapMessage(
+      { ...baseMessage } as never,
+      undefined,
+      "INBOX",
+    );
 
     expect(parsed?.attachments).toBeUndefined();
     expect(parsed?.hasAttachment).toBeUndefined();

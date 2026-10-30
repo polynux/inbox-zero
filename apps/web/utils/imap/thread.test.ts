@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { encodeImapMessageId } from "@/utils/imap/message-id";
 import {
   buildThreadId,
   getAllThreadMessageIds,
@@ -65,34 +66,49 @@ describe("getRootMessageId", () => {
   });
 });
 describe("buildThreadId with a fallback key", () => {
+  const inboxOne = encodeImapMessageId("INBOX", 1);
+  const inboxTwo = encodeImapMessageId("INBOX", 2);
+
   it("gives header-less messages distinct thread ids per key", () => {
-    const first = buildThreadId(undefined, undefined, undefined, "INBOX:1");
-    const second = buildThreadId(undefined, undefined, undefined, "INBOX:2");
+    const first = buildThreadId(undefined, undefined, undefined, inboxOne);
+    const second = buildThreadId(undefined, undefined, undefined, inboxTwo);
     expect(first).not.toBe(second);
   });
 
   it("is stable for the same fallback key", () => {
-    expect(buildThreadId(undefined, undefined, undefined, "INBOX:1")).toBe(
-      buildThreadId(undefined, undefined, undefined, "INBOX:1"),
+    expect(buildThreadId(undefined, undefined, undefined, inboxOne)).toBe(
+      buildThreadId(undefined, undefined, undefined, inboxOne),
     );
   });
 
-  it("keeps the folder:uid key verbatim in the thread id", () => {
-    expect(buildThreadId(undefined, undefined, undefined, "INBOX:1")).toBe(
-      "fallback:INBOX:1",
+  it("keeps the listing key verbatim in the thread id", () => {
+    expect(buildThreadId(undefined, undefined, undefined, inboxOne)).toBe(
+      `fallback:${inboxOne}`,
     );
   });
 });
 
 describe("parseFallbackThreadId", () => {
   it("recovers folder and uid from a header-less thread id", () => {
-    expect(parseFallbackThreadId("fallback:INBOX:9")).toEqual({
-      folder: "INBOX",
-      uid: 9,
-    });
-    expect(parseFallbackThreadId("fallback:All Mail:12")).toEqual({
-      folder: "All Mail",
-      uid: 12,
+    expect(
+      parseFallbackThreadId(`fallback:${encodeImapMessageId("INBOX", 9)}`),
+    ).toEqual({ folder: "INBOX", uid: 9 });
+    expect(
+      parseFallbackThreadId(`fallback:${encodeImapMessageId("All Mail", 12)}`),
+    ).toEqual({ folder: "All Mail", uid: 12 });
+  });
+
+  it("round-trips a folder that contains a slash", () => {
+    const threadId = buildThreadId(
+      undefined,
+      undefined,
+      undefined,
+      encodeImapMessageId("Projects/Acme", 4),
+    );
+
+    expect(parseFallbackThreadId(threadId)).toEqual({
+      folder: "Projects/Acme",
+      uid: 4,
     });
   });
 
@@ -105,10 +121,12 @@ describe("parseFallbackThreadId", () => {
   it.each([
     "fallback:",
     "fallback:INBOX",
-    "fallback:INBOX:",
     "fallback::9",
     "fallback:INBOX:0",
     "fallback:INBOX:x",
+    "fallback:0@SU5CT1g",
+    "fallback:9@",
+    "fallback:9@YQ@Yg",
   ])("rejects malformed key %s", (threadId) => {
     expect(() => parseFallbackThreadId(threadId)).toThrow();
   });
