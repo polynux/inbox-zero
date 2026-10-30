@@ -207,7 +207,12 @@ export class ImapProvider implements EmailProvider {
             flags: true,
             bodyStructure: true,
           })) {
-            const parsed = await convertImapMessage(msg, undefined, folder);
+            const parsed = await convertImapMessage(
+              msg,
+              undefined,
+              folder,
+              mailbox.specialUse,
+            );
             if (parsed) collected.push(parsed);
           }
           continue;

@@ -102,9 +102,12 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       const mailbox = mailboxes.find((candidate) => candidate.path === path);
       if (!mailbox) throw new Error(`mailbox ${path} not found`);
       current = mailbox;
-      client.mailbox = { path };
+      client.mailbox = { path, specialUse: mailbox.specialUse };
       opened.push(path);
-      return { exists: mailbox.messages.length };
+      return {
+        exists: mailbox.messages.length,
+        specialUse: mailbox.specialUse,
+      };
     }),
     search: vi.fn(
       async (
@@ -265,6 +268,28 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       qualifiedId("All Mail", 41),
       qualifiedId("All Mail", 40),
     ]);
+  });
+
+  it("labels a localized Sent folder from special-use on the simple listing path", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [] },
+      {
+        path: "Gesendet",
+        specialUse: "\\Sent",
+        messages: [message(2, "2026-01-01")],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getMessagesWithPagination({
+      inboxOnly: false,
+      maxResults: 10,
+    });
+
+    expect(
+      result.messages.find((m) => m.id === qualifiedId("Gesendet", 2))
+        ?.labelIds,
+    ).toContain("SENT");
   });
 
   it("searches every selectable mailbox and merges by date", async () => {
