@@ -16,6 +16,7 @@ import type {
   LocalRevision,
   MessageKey,
   OperationKey,
+  Provider,
 } from "../identities";
 import type {
   OperationState,
@@ -164,7 +165,7 @@ export type MailStoreInspection = {
   revision: LocalRevision;
   accounts: Array<{
     accountId: string;
-    provider: "google" | "microsoft";
+    provider: Provider;
     generation: string;
     assistantCursor: string | null;
     connection: "ready" | "offline" | "blocked_auth";
@@ -298,7 +299,7 @@ export interface MailStore {
   }): Promise<LocalRevision>;
   ensureAccount(input: {
     accountId: string;
-    provider: "google" | "microsoft";
+    provider: Provider;
     generation: string;
   }): Promise<LocalRevision>;
   evictReplaceableContent(): Promise<{ evictedBodies: number }>;

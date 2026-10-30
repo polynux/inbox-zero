@@ -26,6 +26,7 @@ import type {
   ConversationKey,
   LocalRevision,
   MessageKey,
+  Provider,
 } from "@inboxzero/mail-core/identities";
 import {
   messageAttachmentDescriptorSchema,
@@ -2259,7 +2260,7 @@ async function inspectState(
     revision,
     accounts: accounts.map((row) => ({
       accountId: String(row.account_id),
-      provider: String(row.provider) as "google" | "microsoft",
+      provider: String(row.provider) as Provider,
       generation: String(row.generation),
       assistantCursor:
         row.assistant_cursor == null ? null : String(row.assistant_cursor),
@@ -2346,7 +2347,7 @@ async function resetAccountForGeneration(
   tx: SqlTransaction,
   input: {
     accountId: string;
-    provider: "google" | "microsoft";
+    provider: Provider;
     generation: string;
   },
 ) {
