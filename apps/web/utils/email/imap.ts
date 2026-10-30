@@ -54,6 +54,7 @@ import {
 import { saveDraft } from "@/utils/imap/draft";
 import { sendSmtpEmail } from "@/utils/imap/mail";
 import { buildThreadId } from "@/utils/imap/thread";
+import { SafeError } from "@/utils/error";
 import { createScopedLogger } from "@/utils/logger";
 import { escapeHtml, textToHtmlParagraphs } from "@/utils/string";
 
@@ -942,11 +943,12 @@ ${messageContent}
   }
 
   async getDraft(draftId: string): Promise<ParsedMessage | null> {
+    const uid = parseImapUid(draftId, "Draft id");
     return this.withConnection(async (client) => {
       const draftsFolder = await findDraftsFolder(client);
       if (!draftsFolder) return null;
       await client.mailboxOpen(draftsFolder, { readOnly: true });
-      return fetchMessageByUid(client, Number(draftId));
+      return fetchMessageByUid(client, uid);
     });
   }
 
@@ -1006,11 +1008,12 @@ ${messageContent}
   }
 
   async deleteDraft(draftId: string, _version?: string): Promise<boolean> {
+    const uid = parseImapUid(draftId, "Draft id");
     return this.withConnection(async (client) => {
       const draftsFolder = await findDraftsFolder(client);
       if (!draftsFolder) return false;
       await client.mailboxOpen(draftsFolder);
-      await client.messageDelete(draftId, { uid: true });
+      await client.messageDelete(String(uid), { uid: true });
       return true;
     });
   }
@@ -1570,4 +1573,10 @@ async function resolveSearchFolders(client: ImapFlow): Promise<string[]> {
     .map((mb) => mb.path);
 
   return paths.length > 0 ? paths : ["INBOX"];
+}
+
+function parseImapUid(id: string, what: string): number {
+  if (!/^[1-9]\d*$/.test(id))
+    throw new SafeError(`${what} must be a positive integer UID`);
+  return Number(id);
 }

@@ -276,6 +276,42 @@ describe("ImapProvider drafts without a Drafts mailbox", () => {
   });
 });
 
+describe("ImapProvider draft id validation", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it.each([
+    "1:*",
+    "0",
+    "-3",
+    "abc",
+    "",
+  ])("rejects getDraft(%s) without touching the server", async (draftId) => {
+    const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
+    connection.client = fake.client;
+
+    await expect(new ImapProvider(config).getDraft(draftId)).rejects.toThrow(
+      "positive integer",
+    );
+    expect(fake.opened).toEqual([]);
+  });
+
+  it.each([
+    "1:*",
+    "0",
+    "nope",
+  ])("rejects deleteDraft(%s) without touching the server", async (draftId) => {
+    const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
+    connection.client = fake.client;
+
+    await expect(new ImapProvider(config).deleteDraft(draftId)).rejects.toThrow(
+      "positive integer",
+    );
+    expect(fake.opened).toEqual([]);
+  });
+});
+
 describe("ImapProvider.getMessagesWithAttachments pagination", () => {
   beforeEach(() => {
     connection.client = null;
