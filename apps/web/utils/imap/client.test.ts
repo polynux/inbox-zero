@@ -60,3 +60,33 @@ describe("createImapConnection TLS verification", () => {
     );
   });
 });
+
+describe("createImapConnection STARTTLS", () => {
+  beforeEach(() => {
+    ImapFlowMock.mockClear();
+  });
+
+  it("requires STARTTLS when the IMAP security is starttls", () => {
+    createImapConnection(baseConfig({ imapSecurity: "starttls" }));
+
+    expect(ImapFlowMock).toHaveBeenCalledWith(
+      expect.objectContaining({ secure: false, doSTARTTLS: true }),
+    );
+  });
+
+  it("does not opportunistically upgrade a plaintext connection", () => {
+    createImapConnection(baseConfig({ imapSecurity: "none" }));
+
+    expect(ImapFlowMock).toHaveBeenCalledWith(
+      expect.objectContaining({ secure: false, doSTARTTLS: false }),
+    );
+  });
+
+  it("uses direct TLS without STARTTLS", () => {
+    createImapConnection(baseConfig({ imapSecurity: "tls" }));
+
+    expect(ImapFlowMock).toHaveBeenCalledWith(
+      expect.objectContaining({ secure: true, doSTARTTLS: false }),
+    );
+  });
+});

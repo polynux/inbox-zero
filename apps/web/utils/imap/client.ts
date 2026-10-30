@@ -18,6 +18,10 @@ export function createImapConnection(config: ImapCredentialConfig): ImapFlow {
     host: config.imapHost,
     port: config.imapPort,
     secure: config.imapSecurity === "tls",
+    // STARTTLS must be mandatory when selected: imapflow's default is
+    // opportunistic, so a server (or MITM) that hides the capability gets a
+    // plaintext session instead of a failed connection.
+    doSTARTTLS: config.imapSecurity === "starttls",
     auth: {
       user: config.username,
       pass: config.password,

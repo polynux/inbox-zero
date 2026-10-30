@@ -17,6 +17,8 @@ function createSmtpTransport(config: ImapCredentialConfig) {
     host: config.smtpHost,
     port: config.smtpPort,
     secure: config.smtpSecurity === "tls",
+    // Opportunistic STARTTLS silently falls back to cleartext; fail instead.
+    requireTLS: config.smtpSecurity === "starttls",
     auth: {
       user: config.username,
       pass: config.password,
