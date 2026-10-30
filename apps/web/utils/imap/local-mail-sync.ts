@@ -1,0 +1,221 @@
+import { z } from "zod";
+import type { ImapFlow } from "imapflow";
+import {
+  InvalidMailboxSyncCursorError,
+  decodeMailboxSyncCursor,
+  encodeMailboxSyncCursor,
+} from "@/utils/email/mailbox-sync";
+import type { MailboxSyncPage } from "@/utils/email/types";
+import { withLocalMailSyncBudget } from "@/utils/email/local-mail-sync-budget";
+import { withImapConnection } from "@/utils/imap/client";
+import { listFoldersAsOutlookFolders } from "@/utils/imap/folder";
+import { fetchMessagesByUids, searchImapMessages } from "@/utils/imap/message";
+import type { ImapCredentialConfig } from "@/utils/imap/types";
+import type { Logger } from "@/utils/logger";
+
+const cursorPayloadSchema = z.object({
+  emailAccountId: z.string().min(1),
+  folder: z.string().min(1),
+  uidValidity: z.number().int().optional(),
+  lastUid: z.number().int().nonnegative(),
+});
+
+function encodeImapCursor(
+  emailAccountId: string,
+  folder: string,
+  uidValidity: number | undefined,
+  lastUid: number,
+): string {
+  return encodeMailboxSyncCursor({
+    version: 1,
+    provider: "imap",
+    state: { emailAccountId, folder, uidValidity, lastUid },
+  });
+}
+
+type SyncInput = {
+  config: ImapCredentialConfig;
+  logger: Logger;
+  emailAccountId: string;
+  limit: number;
+  priority?: "backfill" | "current";
+};
+
+/**
+ * UID-based folder-delta sync for IMAP. The cursor tracks the highest seen
+ * UID per folder; UIDVALIDITY changes invalidate it (server-side UID reset).
+ * Deleted/expunged messages are not reported: IMAP has no tombstone feed,
+ * so removals only surface as a full reset when UIDVALIDITY changes.
+ */
+export async function getImapMailboxSyncPage(
+  input: SyncInput & {
+    cursor?: string;
+    after?: Date;
+    folderId?: string;
+  },
+): Promise<MailboxSyncPage> {
+  const folder = input.folderId || "INBOX";
+  return withImapConnection(input.config, async (client) => {
+    const mailbox = await client.mailboxOpen(folder, { readOnly: true });
+    const uidValidity =
+      mailbox.uidValidity === undefined
+        ? undefined
+        : Number(mailbox.uidValidity);
+    const uidNext = mailbox.uidNext === undefined ? 0 : Number(mailbox.uidNext);
+
+    if (input.cursor) {
+      const decoded = decodeMailboxSyncCursor(input.cursor, "imap");
+      const payload = cursorPayloadSchema.parse(decoded.state);
+      if (
+        payload.emailAccountId !== input.emailAccountId ||
+        payload.folder !== folder
+      )
+        throw new InvalidMailboxSyncCursorError();
+      // A UIDVALIDITY change means the server renumbered UIDs; the local
+      // mailbox must drop everything and resnapshot.
+      if (
+        payload.uidValidity !== undefined &&
+        uidValidity !== undefined &&
+        payload.uidValidity !== uidValidity
+      )
+        return getImapSnapshotPage(client, {
+          folder,
+          after: input.after,
+          limit: input.limit,
+          uidValidity,
+          emailAccountId: input.emailAccountId,
+        });
+      return getImapDeltaPage(client, {
+        folder,
+        limit: input.limit,
+        uidValidity,
+        uidNext,
+        lastUid: payload.lastUid,
+        emailAccountId: input.emailAccountId,
+      });
+    }
+
+    if (!input.after)
+      throw new Error("after is required for initial mailbox sync");
+    return getImapSnapshotPage(client, {
+      folder,
+      after: input.after,
+      limit: input.limit,
+      uidValidity,
+      emailAccountId: input.emailAccountId,
+    });
+  });
+}
+
+async function getImapDeltaPage(
+  client: ImapFlow,
+  options: {
+    folder: string;
+    limit: number;
+    uidValidity: number | undefined;
+    uidNext: number;
+    lastUid: number;
+    emailAccountId: string;
+  },
+): Promise<MailboxSyncPage> {
+  if (options.uidNext <= options.lastUid) {
+    return {
+      cursor: encodeImapCursor(
+        options.emailAccountId,
+        options.folder,
+        options.uidValidity,
+        options.lastUid,
+      ),
+      deletedMessageIds: [],
+      hasMore: false,
+      reset: false,
+      upsertedMessages: [],
+    };
+  }
+
+  // searchImapMessages returns newest-first; page oldest-first so the cursor
+  // always advances past everything returned (no gaps, no duplicates).
+  const newUids = (
+    await searchImapMessages(client, {
+      uid: `${options.lastUid + 1}:*`,
+    })
+  ).reverse();
+  const pageUids = newUids.slice(0, options.limit);
+  const messages = await fetchMessagesByUids(client, pageUids);
+  const maxUid = pageUids.length > 0 ? Math.max(...pageUids) : options.lastUid;
+
+  return {
+    cursor: encodeImapCursor(
+      options.emailAccountId,
+      options.folder,
+      options.uidValidity,
+      maxUid,
+    ),
+    deletedMessageIds: [],
+    hasMore: newUids.length > pageUids.length,
+    reset: false,
+    upsertedMessages: messages,
+  };
+}
+
+async function getImapSnapshotPage(
+  client: ImapFlow,
+  options: {
+    folder: string;
+    after?: Date;
+    limit: number;
+    uidValidity: number | undefined;
+    emailAccountId: string;
+  },
+): Promise<MailboxSyncPage> {
+  const criteria: Record<string, unknown> = options.after
+    ? { since: options.after }
+    : { all: true };
+  const allUids = (await searchImapMessages(client, criteria)).reverse();
+  const pageUids = allUids.slice(0, options.limit);
+  const messages = await fetchMessagesByUids(client, pageUids);
+  const maxUid = pageUids.length > 0 ? Math.max(...pageUids) : 0;
+  return {
+    cursor: encodeImapCursor(
+      options.emailAccountId,
+      options.folder,
+      options.uidValidity,
+      maxUid,
+    ),
+    deletedMessageIds: [],
+    hasMore: allUids.length > pageUids.length,
+    reset: true,
+    upsertedMessages: messages,
+  };
+}
+
+export async function getImapMailFoldersPage(
+  input: SyncInput & { parentFolderId?: string; cursor?: string },
+) {
+  if (!input.emailAccountId) throw new Error("Invalid local mail sync input");
+  return withLocalMailSyncBudget(
+    {
+      emailAccountId: input.emailAccountId,
+      provider: "imap",
+      cost: 1,
+      priority: input.priority ?? "backfill",
+    },
+    () =>
+      withImapConnection(input.config, async (client) => {
+        const folders = await listFoldersAsOutlookFolders(client);
+        return {
+          folders: folders.map((folder) => ({
+            id: folder.id,
+            // IMAP hierarchy is flattened: OutlookFolder carries no parent.
+            parentFolderId: undefined as string | undefined,
+            displayName: folder.displayName,
+            childFolderCount: folder.childFolderCount ?? 0,
+            isHidden: false,
+            totalItemCount: folder.totalItemCount ?? 0,
+            unreadItemCount: folder.unreadItemCount ?? 0,
+          })),
+          nextCursor: undefined as string | undefined,
+        };
+      }),
+  );
+}
