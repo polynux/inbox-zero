@@ -58,9 +58,22 @@ describe("getRootMessageId", () => {
     expect(result).toBe("only@ex.com");
   });
 
-  it("returns 'unknown' when all headers are missing", () => {
+  it("returns 'fallback' when all headers are missing", () => {
     const result = getRootMessageId(undefined, undefined, undefined);
-    expect(result).toBe("unknown");
+    expect(result).toBe("fallback");
+  });
+});
+describe("buildThreadId with a fallback key", () => {
+  it("gives header-less messages distinct thread ids per key", () => {
+    const first = buildThreadId(undefined, undefined, undefined, "INBOX:1");
+    const second = buildThreadId(undefined, undefined, undefined, "INBOX:2");
+    expect(first).not.toBe(second);
+  });
+
+  it("is stable for the same fallback key", () => {
+    expect(buildThreadId(undefined, undefined, undefined, "INBOX:1")).toBe(
+      buildThreadId(undefined, undefined, undefined, "INBOX:1"),
+    );
   });
 });
 

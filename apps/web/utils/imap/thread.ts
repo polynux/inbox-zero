@@ -9,7 +9,14 @@ export function buildThreadId(
   references: string | undefined,
   inReplyTo: string | undefined,
   messageId: string | undefined,
+  fallbackKey?: string,
 ): string {
+  if (!references && !inReplyTo && !messageId) {
+    // Header-less message: hash a per-message key (folder + UID) so two
+    // such messages never share a thread. Without a key there is nothing
+    // unique to hash, so keep the legacy constant.
+    return hashToThreadId(fallbackKey ? `fallback:${fallbackKey}` : "fallback");
+  }
   const rootId = getRootMessageId(references, inReplyTo, messageId);
   return hashToThreadId(rootId);
 }
@@ -39,7 +46,7 @@ export function getRootMessageId(
     if (ids.length > 0) return ids[0];
   }
 
-  return "unknown";
+  return "fallback";
 }
 
 /**
