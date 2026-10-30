@@ -43,6 +43,7 @@ export function AddImapAccountForm() {
   const [smtpSecurity, setSmtpSecurity] = useState("starttls");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [isBridgePreset, setIsBridgePreset] = useState(false);
 
   const applyPreset = (presetName: string) => {
     const preset = IMAP_PROVIDER_PRESETS.find((p) => p.name === presetName);
@@ -53,6 +54,7 @@ export function AddImapAccountForm() {
     setSmtpHost(preset.smtpHost);
     setSmtpPort(preset.smtpPort);
     setSmtpSecurity(preset.smtpSecurity);
+    setIsBridgePreset(preset.name === "ProtonMail Bridge");
   };
 
   const handleTestConnection = async () => {
@@ -163,6 +165,12 @@ export function AddImapAccountForm() {
                 ))}
               </SelectContent>
             </Select>
+            {isBridgePreset && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Use the Bridge-generated password (not your Proton password) and
+                set IMAP_ALLOW_PRIVATE_HOSTS=true on the server.
+              </p>
+            )}
           </div>
 
           <div className="grid grid-cols-2 gap-3">
