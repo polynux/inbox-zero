@@ -15,7 +15,10 @@ import {
   RULE_ANALYTICS_EVENTS,
   trackRuleEvent,
 } from "@/utils/analytics/rule-events.server";
-import { isMicrosoftProvider } from "@/utils/email/provider-types";
+import {
+  isImapProvider,
+  isMicrosoftProvider,
+} from "@/utils/email/provider-types";
 import { createEmailProvider } from "@/utils/email/provider";
 import { resolveLabelNameAndId } from "@/utils/label/resolve-label";
 import { getMissingRecipientMessage } from "@/utils/rule/recipient-validation";
@@ -763,7 +766,7 @@ async function mapActionFields(
         a.type === ActionType.MOVE_FOLDER &&
         folderName &&
         !folderId &&
-        isMicrosoftProvider(provider)
+        (isMicrosoftProvider(provider) || isImapProvider(provider))
       ) {
         const emailProvider = await createEmailProvider({
           emailAccountId,
@@ -790,7 +793,7 @@ async function mapActionFields(
         subject: a.fields?.subject,
         content: integrationFields ? null : a.fields?.content,
         url: a.fields?.webhookUrl,
-        ...(isMicrosoftProvider(provider) && {
+        ...((isMicrosoftProvider(provider) || isImapProvider(provider)) && {
           folderName: folderName ?? null,
           folderId,
         }),

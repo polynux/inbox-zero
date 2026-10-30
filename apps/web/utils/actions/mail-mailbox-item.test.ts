@@ -183,14 +183,14 @@ describe("mailbox item actions", () => {
     expect(prisma.$executeRaw).not.toHaveBeenCalled();
   });
 
-  it("rejects folder mutations for non-Outlook accounts", async () => {
+  it("rejects folder mutations for Gmail accounts", async () => {
     const result = await deleteMailboxItemAction(EMAIL_ACCOUNT_ID, {
       kind: "folder",
       id: "folder-1",
     });
 
     expect(result?.serverError).toBe(
-      "Folder actions are only available for Outlook accounts.",
+      "Folder actions are only available for Outlook and IMAP accounts.",
     );
     expect(mockDeleteFolder).not.toHaveBeenCalled();
   });

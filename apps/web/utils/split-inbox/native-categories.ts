@@ -101,7 +101,7 @@ export async function listNativeMailSplits({
     emailProvider.getLabels(),
   ]);
   const folders =
-    emailProvider.name === "microsoft"
+    emailProvider.name === "microsoft" || emailProvider.name === "imap"
       ? flattenOutlookFolders(await emailProvider.getFolders())
       : [];
 
@@ -217,7 +217,7 @@ export async function resolveNativeThreadsQuery({
   }
 
   const labelName = labelNameForCategory(category) ?? category;
-  if (emailProvider.name === "microsoft") {
+  if (emailProvider.name === "microsoft" || emailProvider.name === "imap") {
     const folder = flattenOutlookFolders(await emailProvider.getFolders()).find(
       (item) =>
         item.id === category ||

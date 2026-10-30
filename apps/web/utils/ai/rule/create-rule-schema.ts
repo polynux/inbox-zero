@@ -356,7 +356,9 @@ function createRequiredFolderFieldsSchema(provider: string) {
   const fieldShape = createActionFieldShape(provider);
 
   if (!("folderName" in fieldShape)) {
-    throw new Error("MOVE_FOLDER is only supported for Microsoft providers.");
+    throw new Error(
+      "MOVE_FOLDER is only supported for Microsoft and IMAP providers.",
+    );
   }
 
   return z.object({

@@ -19,6 +19,7 @@ import {
 } from "@/utils/actions/mail.validation";
 import {
   isGoogleProvider,
+  isImapProvider,
   isMicrosoftProvider,
 } from "@/utils/email/provider-types";
 import { isGmailLabelColor } from "@/utils/gmail/label-colors";
@@ -280,6 +281,11 @@ export const updateMailboxItemAction = actionClient
           "Outlook category names cannot be changed. Edit its color instead.",
         );
       }
+      if (kind === "label" && isImapProvider(provider) && color) {
+        throw new SafeError(
+          "IMAP folders have no color settings. Rename the folder instead.",
+        );
+      }
       if (
         (labelListVisibility || messageListVisibility) &&
         !isGoogleProvider(provider)
@@ -514,9 +520,13 @@ function assertMailboxItemMutationSupported({
   kind: "label" | "folder";
   provider: string;
 }) {
-  if (kind === "folder" && !isMicrosoftProvider(provider)) {
+  if (
+    kind === "folder" &&
+    !isMicrosoftProvider(provider) &&
+    !isImapProvider(provider)
+  ) {
     throw new SafeError(
-      "Folder actions are only available for Outlook accounts.",
+      "Folder actions are only available for Outlook and IMAP accounts.",
     );
   }
 }

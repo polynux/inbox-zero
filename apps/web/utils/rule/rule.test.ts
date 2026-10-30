@@ -36,6 +36,7 @@ vi.mock("@/utils/analytics/rule-events.server", () => ({
   trackRuleEvent: trackRuleEventMock,
 }));
 vi.mock("@/utils/email/provider-types", () => ({
+  isImapProvider: vi.fn(() => false),
   isMicrosoftProvider: vi.fn(() => false),
 }));
 vi.mock("@/utils/email/provider", () => ({

@@ -1,16 +1,21 @@
 import { NextResponse } from "next/server";
 import { withEmailProvider } from "@/utils/middleware";
-import { isMicrosoftProvider } from "@/utils/email/provider-types";
-import type { EmailProvider } from "@/utils/email/types";
+import {
+  isImapProvider,
+  isMicrosoftProvider,
+} from "@/utils/email/provider-types";
 
 export type GetFoldersResponse = Awaited<ReturnType<typeof getFolders>>;
 
 export const GET = withEmailProvider("user/folders", async (request) => {
   const emailProvider = request.emailProvider;
 
-  if (!isMicrosoftProvider(emailProvider.name)) {
+  if (
+    !isMicrosoftProvider(emailProvider.name) &&
+    !isImapProvider(emailProvider.name)
+  ) {
     return NextResponse.json(
-      { error: "Only Microsoft email providers are supported" },
+      { error: "Only Microsoft and IMAP email providers are supported" },
       { status: 400 },
     );
   }
