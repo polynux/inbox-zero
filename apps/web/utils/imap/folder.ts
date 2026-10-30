@@ -74,9 +74,9 @@ export async function getOrCreateFolder(
 }
 
 /**
- * Move a message to a different folder. Returns whether anything moved:
- * imapflow resolves a missing UID to an empty range and reports success,
- * so callers that need certainty must verify presence first.
+ * Move a message to a different folder. imapflow resolves a missing UID to
+ * an empty range and reports success, so this returns nothing; callers that
+ * need certainty must verify presence first.
  */
 export async function moveMessageToFolder(
   client: ImapFlow,

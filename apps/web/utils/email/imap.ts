@@ -307,9 +307,6 @@ export class ImapProvider implements EmailProvider {
     _options?: GetThreadOptions,
   ): Promise<EmailThread> {
     const messages = await this.getThreadMessages(threadId);
-    if (messages.length === 0) {
-      throw new Error(`Thread ${threadId} not found`);
-    }
     return {
       id: threadId,
       messages,
@@ -324,7 +321,7 @@ export class ImapProvider implements EmailProvider {
     const messages = await this.withConnection((client) =>
       fetchThreadMessages(client, threadId, options),
     );
-    if (messages.length === 0) throw new Error(`Thread ${threadId} not found`);
+    if (messages.length === 0) throw new ImapThreadNotFoundError(threadId);
     return messages.sort(
       (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime(),
     );
@@ -581,9 +578,10 @@ export class ImapProvider implements EmailProvider {
       messages = await this.getThreadMessages(threadId);
     } catch (error) {
       // Gmail treats archiving a vanished thread as success (404 → no-op);
-      // IMAP already throws "not found" from getThreadMessages, so match it
-      // instead of failing automations that race a concurrent move.
-      if (error instanceof Error && /not found/i.test(error.message)) {
+      // IMAP already throws ImapThreadNotFoundError from getThreadMessages,
+      // so match only that instead of failing automations that race a
+      // concurrent move (and never swallow an unrelated "not found").
+      if (error instanceof ImapThreadNotFoundError) {
         this.logger.warn("IMAP archiveThread on missing thread", { threadId });
         return;
       }
@@ -652,7 +650,8 @@ export class ImapProvider implements EmailProvider {
     } catch (error) {
       // Same no-op-on-missing rule as archiveThread: Gmail trash returns 200
       // for an already-deleted thread, so a raced automation must not fail.
-      if (error instanceof Error && /not found/i.test(error.message)) {
+      // Match only the thread-not-found error, never any "/not found/".
+      if (error instanceof ImapThreadNotFoundError) {
         this.logger.warn("IMAP trashThread on missing thread", { threadId });
         return;
       }
@@ -1896,4 +1895,11 @@ async function filterUidsByExactAddress(
 function isAlreadyInTargetError(error: unknown): boolean {
   const text = error instanceof Error ? error.message : String(error);
   return /already (exists|in|there)|ALREADYEXISTS/i.test(text);
+}
+
+class ImapThreadNotFoundError extends Error {
+  constructor(threadId: string) {
+    super(`Thread ${threadId} not found`);
+    this.name = "ImapThreadNotFoundError";
+  }
 }

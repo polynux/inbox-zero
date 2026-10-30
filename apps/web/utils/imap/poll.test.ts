@@ -98,6 +98,22 @@ describe("pollImapAccount", () => {
     );
   });
 
+  it("keeps the baseline unset when the server omits UIDNEXT", async () => {
+    mockLastSeenUid(null);
+    vi.mocked(stubClient.mailboxOpen).mockResolvedValueOnce({} as never);
+
+    const result = await pollImapAccount("email-account-1");
+
+    expect(result).toEqual({
+      emailAccountId: "email-account-1",
+      newMessages: 0,
+    });
+    expect(prisma.imapCredential.update).toHaveBeenCalledWith({
+      where: { id: "credential-1" },
+      data: { lastPolledAt: expect.any(Date) },
+    });
+  });
+
   it("never moves the stored UID backward", async () => {
     mockLastSeenUid(10);
 

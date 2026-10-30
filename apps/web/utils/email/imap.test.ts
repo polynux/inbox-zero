@@ -770,6 +770,22 @@ describe("ImapProvider unknown threads", () => {
     connection.client = null;
   });
 
+  it("rethrows an unrelated error that merely mentions 'not found'", async () => {
+    const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
+    fake.client.mailboxOpen = vi.fn(async () => {
+      throw new Error("mailbox INBOX not found");
+    });
+    connection.client = fake.client;
+    const provider = new ImapProvider(config);
+
+    await expect(
+      provider.archiveThread("any-thread", "owner@x.com"),
+    ).rejects.toThrow(/not found/i);
+    await expect(
+      provider.trashThread("any-thread", "owner@x.com", "user"),
+    ).rejects.toThrow(/not found/i);
+  });
+
   it("getThreadMessages throws for an unknown thread", async () => {
     const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
     connection.client = fake.client;
