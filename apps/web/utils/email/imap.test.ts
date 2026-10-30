@@ -238,6 +238,28 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
   });
 });
 
+describe("ImapProvider drafts without a Drafts mailbox", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("returns empty drafts and a missing draft without opening a folder", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [message(1, "2026-01-01")],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const provider = new ImapProvider(config);
+    await expect(provider.getDrafts()).resolves.toEqual([]);
+    await expect(provider.getDraft("1")).resolves.toBeNull();
+    await expect(provider.deleteDraft("1")).resolves.toBe(false);
+    expect(fake.opened).toEqual([]);
+  });
+});
+
 describe("ImapProvider.getMessagesWithAttachments pagination", () => {
   beforeEach(() => {
     connection.client = null;

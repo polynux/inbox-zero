@@ -64,11 +64,9 @@ describe("findDraftsFolder", () => {
     await expect(findDraftsFolder(client)).resolves.toBe("Entwürfe");
   });
 
-  it("rejects instead of appending to a folder the server does not list", async () => {
+  it("returns null when the LIST result has no drafts mailbox", async () => {
     const { client } = mockClient([mailbox("INBOX"), mailbox("Sent")]);
-    await expect(findDraftsFolder(client)).rejects.toThrow(
-      "No Drafts folder found",
-    );
+    await expect(findDraftsFolder(client)).resolves.toBeNull();
   });
 });
 

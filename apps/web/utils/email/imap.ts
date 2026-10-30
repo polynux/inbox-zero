@@ -926,6 +926,7 @@ ${email.textHtml || email.textPlain || ""}
   async getDrafts(options?: { maxResults?: number }): Promise<ParsedMessage[]> {
     return this.withConnection(async (client) => {
       const draftsFolder = await findDraftsFolder(client);
+      if (!draftsFolder) return [];
       await client.mailboxOpen(draftsFolder, { readOnly: true });
       const uids = await searchImapMessages(
         client,
@@ -939,6 +940,7 @@ ${email.textHtml || email.textPlain || ""}
   async getDraft(draftId: string): Promise<ParsedMessage | null> {
     return this.withConnection(async (client) => {
       const draftsFolder = await findDraftsFolder(client);
+      if (!draftsFolder) return null;
       await client.mailboxOpen(draftsFolder, { readOnly: true });
       return fetchMessageByUid(client, Number(draftId));
     });
@@ -1002,6 +1004,7 @@ ${email.textHtml || email.textPlain || ""}
   async deleteDraft(draftId: string, _version?: string): Promise<boolean> {
     return this.withConnection(async (client) => {
       const draftsFolder = await findDraftsFolder(client);
+      if (!draftsFolder) return false;
       await client.mailboxOpen(draftsFolder);
       await client.messageDelete(draftId, { uid: true });
       return true;

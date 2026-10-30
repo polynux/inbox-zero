@@ -154,9 +154,11 @@ export async function findSentFolder(client: ImapFlow): Promise<string | null> {
 
 /**
  * Find the drafts folder path.
- * Throws when the server lists no drafts mailbox: APPEND needs a real folder.
+ * Returns null when the server lists no drafts mailbox.
  */
-export async function findDraftsFolder(client: ImapFlow): Promise<string> {
+export async function findDraftsFolder(
+  client: ImapFlow,
+): Promise<string | null> {
   const mailboxes = await client.list();
 
   const drafts = mailboxes.find((mb) => mb.specialUse === "\\Drafts");
@@ -170,5 +172,5 @@ export async function findDraftsFolder(client: ImapFlow): Promise<string> {
     if (found) return found.path;
   }
 
-  throw new Error("No Drafts folder found on the IMAP server");
+  return null;
 }

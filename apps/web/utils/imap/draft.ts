@@ -17,7 +17,23 @@ export async function saveDraft(
     references?: string;
   },
 ): Promise<string> {
-  const draftsFolder = await findDraftsFolder(client);
+  let draftsFolder = await findDraftsFolder(client);
+
+  if (!draftsFolder) {
+    try {
+      await client.mailboxCreate("Drafts");
+    } catch {
+      throw new Error(
+        "No Drafts folder found on the IMAP server and creating one failed",
+      );
+    }
+    draftsFolder = await findDraftsFolder(client);
+    if (!draftsFolder) {
+      throw new Error(
+        "No Drafts folder found on the IMAP server and creating one failed",
+      );
+    }
+  }
 
   const messageParts: string[] = [
     `From: ${stripHeaderBreaks(options.from)}`,
