@@ -160,3 +160,48 @@ describe("convertImapMessage attachments", () => {
     expect(parsed?.inline).toEqual([]);
   });
 });
+
+describe("convertImapMessage label ids", () => {
+  const baseMessage = {
+    uid: 7,
+    envelope: {
+      date: new Date("2026-01-01"),
+      subject: "Hello",
+      from: [{ address: "sender@example.com" }],
+      to: [],
+    },
+    flags: new Set<string>(),
+  };
+
+  it("maps an unseen INBOX message to UNREAD + INBOX", async () => {
+    const parsed = await convertImapMessage(
+      { ...baseMessage } as never,
+      undefined,
+      "INBOX",
+    );
+    expect(parsed?.labelIds).toContain("UNREAD");
+    expect(parsed?.labelIds).toContain("INBOX");
+    expect(parsed?.labelIds).not.toContain("\\Seen");
+  });
+
+  it("maps flags and the Sent folder to STARRED + SENT without UNREAD", async () => {
+    const parsed = await convertImapMessage(
+      { ...baseMessage, flags: new Set(["\\Seen", "\\Flagged"]) } as never,
+      undefined,
+      "Sent",
+    );
+    expect(parsed?.labelIds).toContain("STARRED");
+    expect(parsed?.labelIds).toContain("SENT");
+    expect(parsed?.labelIds).not.toContain("UNREAD");
+    expect(parsed?.labelIds).not.toContain("INBOX");
+  });
+
+  it("keeps custom keywords", async () => {
+    const parsed = await convertImapMessage(
+      { ...baseMessage, flags: new Set(["$MailFlagBit0"]) } as never,
+      undefined,
+      "INBOX",
+    );
+    expect(parsed?.labelIds).toContain("$MailFlagBit0");
+  });
+});

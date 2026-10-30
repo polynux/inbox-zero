@@ -8,6 +8,64 @@ import { simpleParser } from "mailparser";
 import type { ParsedMessage, ParsedMessageHeaders } from "@/utils/types";
 import { buildThreadId } from "@/utils/imap/thread";
 
+// Gmail-style system label ids that downstream consumers (sync observations,
+// stats, assistant tools) read off ParsedMessage.labelIds.
+const IMAP_LABEL = {
+  INBOX: "INBOX",
+  SENT: "SENT",
+  UNREAD: "UNREAD",
+  STARRED: "STARRED",
+  SPAM: "SPAM",
+  TRASH: "TRASH",
+  DRAFT: "DRAFT",
+} as const;
+
+export function buildImapLabelIds(options: {
+  flags?: Set<string> | string[];
+  folderPath?: string;
+  specialUse?: string;
+}): string[] {
+  const flags = options.flags ? [...options.flags] : [];
+  const labelIds: string[] = [];
+
+  if (!flags.includes("\\Seen")) labelIds.push(IMAP_LABEL.UNREAD);
+  if (flags.includes("\\Flagged")) labelIds.push(IMAP_LABEL.STARRED);
+  if (flags.includes("\\Draft")) labelIds.push(IMAP_LABEL.DRAFT);
+
+  const role = imapRoleLabel(options.folderPath, options.specialUse);
+  if (role) labelIds.push(role);
+
+  for (const flag of flags) {
+    if (flag.startsWith("\\") || labelIds.includes(flag)) continue;
+    labelIds.push(flag);
+  }
+
+  return labelIds;
+}
+
+function imapRoleLabel(
+  folderPath?: string,
+  specialUse?: string,
+): string | undefined {
+  const use = specialUse?.toLowerCase();
+  if (use === "\\trash") return IMAP_LABEL.TRASH;
+  if (use === "\\junk") return IMAP_LABEL.SPAM;
+  if (use === "\\sent") return IMAP_LABEL.SENT;
+  if (use === "\\drafts") return IMAP_LABEL.DRAFT;
+  if (use === "\\inbox") return IMAP_LABEL.INBOX;
+
+  const folder = folderPath?.toLowerCase();
+  if (!folder) return;
+  if (folder === "inbox") return IMAP_LABEL.INBOX;
+  if (folder.includes("trash") || folder.includes("deleted"))
+    return IMAP_LABEL.TRASH;
+  if (folder.includes("junk") || folder.includes("spam"))
+    return IMAP_LABEL.SPAM;
+  if (folder.includes("sent")) return IMAP_LABEL.SENT;
+  if (folder.includes("draft")) return IMAP_LABEL.DRAFT;
+  return;
+}
+
 /**
  * Fetch a single message by sequence number with full body content.
  */
@@ -25,7 +83,7 @@ export async function fetchMessageBySeq(
   if (!msg) return null;
 
   const body = await downloadMessageBody(client, seq);
-  return convertImapMessage(msg, body);
+  return convertImapMessage(msg, body, client.mailbox?.path);
 }
 
 /**
@@ -52,7 +110,7 @@ export async function fetchMessageByUid(
     if (!msg) return null;
 
     const body = await downloadMessageBody(client, seq);
-    return convertImapMessage(msg, body);
+    return convertImapMessage(msg, body, client.mailbox?.path);
   } catch {
     return null;
   }
@@ -80,7 +138,7 @@ export async function fetchRecentMessages(
     flags: true,
     bodyStructure: true,
   })) {
-    const parsed = await convertImapMessage(msg);
+    const parsed = await convertImapMessage(msg, undefined, mailbox.path);
     if (parsed) messages.push(parsed);
   }
 
@@ -119,7 +177,11 @@ export async function fetchMessagesByUids(
         bodyStructure: true,
       });
       if (msg) {
-        const parsed = await convertImapMessage(msg);
+        const parsed = await convertImapMessage(
+          msg,
+          undefined,
+          client.mailbox?.path,
+        );
         if (parsed) messages.push(parsed);
       }
     } catch {
@@ -189,6 +251,7 @@ export async function searchImapMessages(
 export async function convertImapMessage(
   msg: FetchMessageObject,
   body?: { textHtml?: string; textPlain?: string; references?: string },
+  folderPath?: string,
 ): Promise<ParsedMessage | null> {
   try {
     const envelope = msg.envelope;
@@ -225,10 +288,17 @@ export async function convertImapMessage(
       ? new Date(envelope.date).toISOString()
       : new Date().toISOString();
 
-    const threadId = buildThreadId(references, inReplyTo, messageId);
+    const fallbackKey =
+      folderPath && msg.uid ? `${folderPath}:${msg.uid}` : undefined;
+    const threadId = buildThreadId(
+      references,
+      inReplyTo,
+      messageId,
+      fallbackKey,
+    );
 
     const flags = msg.flags ? [...msg.flags] : [];
-    const labelIds = flags;
+    const labelIds = buildImapLabelIds({ flags, folderPath });
 
     const headers: ParsedMessageHeaders = {
       from: fromStr,
