@@ -9,6 +9,7 @@ import type { Socket } from "node:net";
 import { connect } from "node:tls";
 import { ImapFlow } from "imapflow";
 import nodemailer from "nodemailer";
+import { shouldBypassTlsVerification } from "@/utils/imap/tls";
 
 const REQUIRED_ENV = [
   "IMAP_HOST",
@@ -58,9 +59,9 @@ async function probeImap(config: ProbeConfig) {
     secure: config.imapSecure,
     auth: { user: config.imapUser, pass: config.imapPass },
     logger: false,
-    // Self-signed Bridge certificates are expected on loopback; the probe is
-    // a local diagnostic tool, never part of the hosted app surface.
-    tls: { rejectUnauthorized: false },
+    // Bridge's self-signed certificate is only accepted on loopback, same rule
+    // as the app; a remote host must present a valid certificate.
+    tls: { rejectUnauthorized: !bypassTlsVerification(config.imapHost) },
   });
 
   await client.connect();
@@ -102,10 +103,11 @@ async function readEhloReply(
   host: string,
   port: number,
   secure: boolean,
+  rejectUnauthorized: boolean,
 ): Promise<string[]> {
   const { promise, resolve, reject } = Promise.withResolvers<string[]>();
   const socket: Socket = secure
-    ? connect({ host, port })
+    ? connect({ host, port, rejectUnauthorized })
     : createConnection({ host, port });
 
   let greeted = false;
@@ -147,6 +149,7 @@ async function probeSmtp(config: ProbeConfig) {
     config.smtpHost,
     config.smtpPort,
     config.smtpSecure,
+    !bypassTlsVerification(config.smtpHost),
   )) {
     console.log(`- ${line}`);
   }
@@ -157,7 +160,7 @@ async function probeSmtp(config: ProbeConfig) {
     port: config.smtpPort,
     secure: config.smtpSecure,
     auth: { user: config.smtpUser, pass: config.smtpPass },
-    tls: { rejectUnauthorized: false },
+    tls: { rejectUnauthorized: !bypassTlsVerification(config.smtpHost) },
   });
 
   try {
@@ -180,3 +183,11 @@ main().catch((error) => {
   );
   process.exit(1);
 });
+
+// Same rule as the app: skip verification only for a loopback host, and only
+// when the operator opted in (Bridge's certificate is self-signed).
+function bypassTlsVerification(host: string): boolean {
+  return shouldBypassTlsVerification(host, {
+    allowPrivateHosts: process.env.IMAP_ALLOW_PRIVATE_HOSTS === "true",
+  });
+}
