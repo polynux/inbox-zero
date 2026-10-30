@@ -593,3 +593,60 @@ describe("ImapProvider unknown threads", () => {
     ).rejects.toThrow(/not found/i);
   });
 });
+
+describe("ImapProvider restore paths", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("unarchiveMessages moves from the Archive folder, not INBOX", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [] },
+      { path: "Archive", messages: [message(7, "2026-01-01")] },
+    ]);
+    const moved: Array<{ uid: number; folder: string; from: string }> = [];
+    fake.client.messageMove = vi.fn(async (uid: string, folder: string) => {
+      moved.push({ uid: Number(uid), folder, from: fake.opened.at(-1) || "" });
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).unarchiveMessages(["7"]);
+
+    expect(moved).toEqual([{ uid: 7, folder: "INBOX", from: "Archive" }]);
+  });
+
+  it("untrashMessages moves from the Trash folder, not INBOX", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [] },
+      { path: "Trash", specialUse: "\\Trash", messages: [] },
+    ]);
+    const moved: Array<{ uid: number; folder: string; from: string }> = [];
+    fake.client.search = vi.fn(async (criteria: Record<string, unknown>) => {
+      if (criteria.uid !== undefined) return [1];
+      return [5];
+    });
+    fake.client.messageMove = vi.fn(async (uid: string, folder: string) => {
+      moved.push({ uid: Number(uid), folder, from: fake.opened.at(-1) || "" });
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).untrashMessages(["5"]);
+
+    expect(moved).toEqual([{ uid: 5, folder: "INBOX", from: "Trash" }]);
+  });
+
+  it("archiveMessages rethrows unexpected move errors", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+      { path: "Archive", messages: [] },
+    ]);
+    fake.client.messageMove = vi.fn(async () => {
+      throw new Error("UID not found in mailbox");
+    });
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).archiveMessages(["1"]),
+    ).rejects.toThrow(/UID not found/);
+  });
+});

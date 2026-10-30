@@ -44,6 +44,7 @@ import type { DraftAttachmentMetadata } from "@/utils/actions/draft-attachments.
 import {
   findArchiveFolder,
   findDraftsFolder,
+  findJunkFolder,
   findSentFolder,
   findTrashFolder,
   getOrCreateFolder,
@@ -562,8 +563,14 @@ export class ImapProvider implements EmailProvider {
       for (const msg of messages) {
         try {
           await moveMessageToFolder(client, Number(msg.id), archiveFolder);
-        } catch {
-          // Message might already be in archive or another folder
+        } catch (error) {
+          if (isAlreadyInTargetError(error)) continue;
+          this.logger.warn("IMAP archiveThread move failed", {
+            threadId,
+            messageId: msg.id,
+            error,
+          });
+          throw error;
         }
       }
     });
@@ -609,8 +616,14 @@ export class ImapProvider implements EmailProvider {
       for (const msg of messages) {
         try {
           await moveMessageToFolder(client, Number(msg.id), trashFolder);
-        } catch {
-          // Message might already be trashed
+        } catch (error) {
+          if (isAlreadyInTargetError(error)) continue;
+          this.logger.warn("IMAP trashThread move failed", {
+            threadId,
+            messageId: msg.id,
+            error,
+          });
+          throw error;
         }
       }
     });
@@ -1194,8 +1207,13 @@ ${messageContent}
       for (const messageId of new Set(messageIds)) {
         try {
           await moveMessageToFolder(client, Number(messageId), archiveFolder);
-        } catch {
-          // Message may live in another folder
+        } catch (error) {
+          if (isAlreadyInTargetError(error)) continue;
+          this.logger.warn("IMAP archiveMessages move failed", {
+            messageId,
+            error,
+          });
+          throw error;
         }
       }
     });
@@ -1203,13 +1221,16 @@ ${messageContent}
 
   async unarchiveMessages(messageIds: string[]): Promise<void> {
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
+      const archiveFolder = await findArchiveFolder(client);
+      const folders = await resolveSearchFolders(client);
       for (const messageId of new Set(messageIds)) {
-        try {
-          await moveMessageToFolder(client, Number(messageId), "INBOX");
-        } catch {
-          // Message may live in another folder
-        }
+        await moveMessageFromFolders(
+          client,
+          Number(messageId),
+          "INBOX",
+          [archiveFolder, ...folders],
+          this.logger,
+        );
       }
     });
   }
@@ -1230,7 +1251,20 @@ ${messageContent}
   }
 
   async untrashMessages(messageIds: string[]): Promise<void> {
-    return this.unarchiveMessages(messageIds);
+    return this.withConnection(async (client) => {
+      const trashFolder = await findTrashFolder(client);
+      if (!trashFolder) throw new Error("No trash folder found");
+      const folders = await resolveSearchFolders(client);
+      for (const messageId of new Set(messageIds)) {
+        await moveMessageFromFolders(
+          client,
+          Number(messageId),
+          "INBOX",
+          [trashFolder, ...folders],
+          this.logger,
+        );
+      }
+    });
   }
 
   async markMessagesReadState(
@@ -1293,13 +1327,16 @@ ${messageContent}
   async markNotSpam(threadId: string): Promise<void> {
     const messages = await this.getThreadMessages(threadId);
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
+      const junkFolder = await findJunkFolder(client);
+      const folders = await resolveSearchFolders(client);
       for (const msg of messages) {
-        try {
-          await moveMessageToFolder(client, Number(msg.id), "INBOX");
-        } catch {
-          // Message might already be in the inbox
-        }
+        await moveMessageFromFolders(
+          client,
+          Number(msg.id),
+          "INBOX",
+          [junkFolder, ...folders].filter((f) => f !== null),
+          this.logger,
+        );
       }
     });
   }
@@ -1307,13 +1344,16 @@ ${messageContent}
   async unarchiveThread(threadId: string): Promise<void> {
     const messages = await this.getThreadMessages(threadId);
     return this.withConnection(async (client) => {
-      await client.mailboxOpen("INBOX");
+      const archiveFolder = await findArchiveFolder(client);
+      const folders = await resolveSearchFolders(client);
       for (const msg of messages) {
-        try {
-          await moveMessageToFolder(client, Number(msg.id), "INBOX");
-        } catch {
-          // Message might already be in the inbox
-        }
+        await moveMessageFromFolders(
+          client,
+          Number(msg.id),
+          "INBOX",
+          [archiveFolder, ...folders],
+          this.logger,
+        );
       }
     });
   }
@@ -1696,6 +1736,7 @@ async function fetchThreadMessages(
     // References/In-Reply-To/Message-ID headers, which SEARCH cannot see,
     // so fetch envelopes and match locally. Newest 200 covers active
     // threads; older members are picked up via their references below.
+    if (!client.mailbox) continue;
     const recent = await fetchRecentMessages(client, client.mailbox, 200);
     for (const message of recent) {
       if (message.threadId === threadId) byUid.set(message.id, message);
@@ -1754,4 +1795,44 @@ async function filterThreadCandidates(
 ): Promise<ParsedMessage[]> {
   const messages = await fetchMessagesByUids(client, uids);
   return messages.filter((message) => message.threadId === threadId);
+}
+
+/**
+ * Move one UID to a target folder, trying each source folder in order.
+ * UIDs are per-folder, so a message may live outside the folder the caller
+ * opened: open every candidate and move from the one that has it.
+ */
+async function moveMessageFromFolders(
+  client: ImapFlow,
+  uid: number,
+  targetFolder: string,
+  sourceFolders: string[],
+  log: Logger,
+): Promise<void> {
+  let lastError: unknown = null;
+  for (const folder of new Set(sourceFolders)) {
+    await client.mailboxOpen(folder);
+    try {
+      const moved = await moveMessageToFolder(client, uid, targetFolder);
+      if (moved !== false) return;
+      lastError = new Error(`UID ${uid} not in ${folder}`);
+    } catch (error) {
+      if (isAlreadyInTargetError(error)) return;
+      log.warn("IMAP move failed", { uid, folder, targetFolder, error });
+      throw error;
+    }
+  }
+  if (lastError) {
+    log.warn("IMAP move found no source folder", {
+      uid,
+      targetFolder,
+      error: lastError,
+    });
+    throw lastError;
+  }
+}
+
+function isAlreadyInTargetError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message : String(error);
+  return /already (exists|in|there)|ALREADYEXISTS/i.test(text);
 }

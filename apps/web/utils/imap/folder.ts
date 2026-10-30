@@ -174,3 +174,24 @@ export async function findDraftsFolder(
 
   return null;
 }
+
+/**
+ * Find the junk/spam folder path.
+ * Returns null when the server lists no junk mailbox.
+ */
+export async function findJunkFolder(client: ImapFlow): Promise<string | null> {
+  const mailboxes = await client.list();
+
+  const junk = mailboxes.find((mb) => mb.specialUse === "\\Junk");
+  if (junk) return junk.path;
+
+  const junkNames = ["Junk", "Spam", "Junk Mail", "Junk E-Mail"];
+  for (const name of junkNames) {
+    const found = mailboxes.find(
+      (mb) => mb.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (found) return found.path;
+  }
+
+  return null;
+}

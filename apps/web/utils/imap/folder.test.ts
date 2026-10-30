@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   findArchiveFolder,
   findDraftsFolder,
+  findJunkFolder,
   findSentFolder,
   findTrashFolder,
 } from "@/utils/imap/folder";
@@ -84,5 +85,25 @@ describe("findArchiveFolder", () => {
     const { client, mailboxCreate } = mockClient([mailbox("INBOX")]);
     await expect(findArchiveFolder(client)).resolves.toBe("Archive");
     expect(mailboxCreate).toHaveBeenCalledWith("Archive");
+  });
+});
+
+describe("findJunkFolder", () => {
+  it("returns the special-use junk mailbox", async () => {
+    const { client } = mockClient([
+      mailbox("INBOX"),
+      mailbox("Junk Mail", "\\Junk"),
+    ]);
+    await expect(findJunkFolder(client)).resolves.toBe("Junk Mail");
+  });
+
+  it("returns a folder whose name matches a known junk name", async () => {
+    const { client } = mockClient([mailbox("INBOX"), mailbox("Spam")]);
+    await expect(findJunkFolder(client)).resolves.toBe("Spam");
+  });
+
+  it("returns null when the LIST result has no junk mailbox", async () => {
+    const { client } = mockClient([mailbox("INBOX"), mailbox("Archive")]);
+    await expect(findJunkFolder(client)).resolves.toBeNull();
   });
 });
