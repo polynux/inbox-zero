@@ -381,7 +381,7 @@ function formatAddress(
 
 // RFC 5322 References is a foldable list of Message-IDs; unfold and collapse
 // whitespace so buildThreadId recovers the same root as the body path.
-function parseReferencesHeader(raw: Buffer): { references: string } {
+export function parseReferencesHeader(raw: Buffer): { references: string } {
   const unfolded = raw.toString("utf8").replace(/\r\n[ \t]+/g, " ");
   const values = [...unfolded.matchAll(/^references:(.*)$/gim)].map((m) =>
     m[1].trim(),
