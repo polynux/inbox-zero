@@ -18,6 +18,7 @@ import type {
   EmailThread,
   GetThreadOptions,
   MailboxSyncPage,
+  ProviderMailboxSearch,
   SentMessagePage,
 } from "@/utils/email/types";
 import type { ParsedMessage } from "@/utils/types";
@@ -181,6 +182,7 @@ export class ImapProvider implements EmailProvider {
     after?: Date;
     inboxOnly?: boolean;
     unreadOnly?: boolean;
+    includeTrashAndJunk?: boolean;
   }): Promise<{ messages: ParsedMessage[]; nextPageToken?: string }> {
     // Folder-scoped bootstrap pages (Archived/Trash views) read from the
     // same folder-delta sync as catch-up, so the views list what local
@@ -203,7 +205,9 @@ export class ImapProvider implements EmailProvider {
     return this.withConnection(async (client) => {
       const folders =
         options.inboxOnly === false
-          ? await resolveSearchFolders(client)
+          ? await resolveSearchFolders(client, {
+              includeTrashAndJunk: options.includeTrashAndJunk,
+            })
           : ["INBOX"];
 
       const maxResults = options.maxResults || 20;
@@ -293,13 +297,36 @@ export class ImapProvider implements EmailProvider {
 
   async searchMessages(options: {
     query: string;
+    mailboxSearch?: ProviderMailboxSearch;
     maxResults?: number;
     pageToken?: string;
   }): Promise<{ messages: ParsedMessage[]; nextPageToken?: string }> {
-    return this.getMessagesWithPagination({
-      query: options.query,
-      maxResults: options.maxResults,
-      pageToken: options.pageToken,
+    const search = options.mailboxSearch;
+    if (!search) {
+      return this.getMessagesWithPagination({
+        query: options.query,
+        maxResults: options.maxResults,
+        pageToken: options.pageToken,
+      });
+    }
+    return this.withConnection(async (client) => {
+      const folder = await mailboxSearchFolder(client, search.mailbox);
+      // Like Outlook's well-known-folder mapping: a scoped mailbox searches
+      // that folder only; unmappable scopes fall back to the whole mailbox.
+      if (!folder) {
+        return this.getMessagesWithPagination({
+          query: mailboxSearchQuery(search),
+          maxResults: options.maxResults,
+          pageToken: options.pageToken,
+          inboxOnly: false,
+        });
+      }
+      return searchImapFolder(client, {
+        folder,
+        search,
+        maxResults: options.maxResults,
+        pageToken: options.pageToken,
+      });
     });
   }
 
@@ -1866,23 +1893,49 @@ ${messageContent}
     folder?: "spam" | "trash";
     labelIds?: string[];
   }): Promise<{ threads: EmailThread[]; nextPageToken?: string }> {
+    if (options.folder) {
+      const { messages, nextPageToken } = await this.withConnection(
+        async (client) => {
+          const folder =
+            options.folder === "spam"
+              ? await findJunkFolder(client)
+              : await findTrashFolder(client);
+          if (!folder) return { messages: [], nextPageToken: undefined };
+          return searchImapFolder(client, {
+            folder,
+            search: {
+              mailbox: options.folder as "spam" | "trash",
+              ...(options.query
+                ? {
+                    text: {
+                      kind: "text",
+                      field: "any",
+                      value: options.query,
+                      match: "term",
+                    } as const,
+                  }
+                : {}),
+            },
+            maxResults: options.maxResults,
+            pageToken: options.pageToken,
+          });
+        },
+      );
+      return {
+        threads: groupImapSearchThreads(messages),
+        nextPageToken,
+      };
+    }
     const { messages, nextPageToken } = await this.getMessagesWithPagination({
       query: options.query,
       maxResults: options.maxResults,
       pageToken: options.pageToken,
+      ...(options.includeSpamTrash
+        ? { inboxOnly: false, includeTrashAndJunk: true }
+        : {}),
     });
-    const threadMap = new Map<string, ParsedMessage[]>();
-    for (const msg of messages) {
-      const existing = threadMap.get(msg.threadId) || [];
-      existing.push(msg);
-      threadMap.set(msg.threadId, existing);
-    }
     return {
-      threads: [...threadMap.entries()].map(([id, msgs]) => ({
-        id,
-        messages: msgs,
-        snippet: msgs[msgs.length - 1].snippet,
-      })),
+      threads: groupImapSearchThreads(messages),
       nextPageToken,
     };
   }
@@ -2379,6 +2432,136 @@ async function openFolderSkippingNo(
     if (!isNoResponse(error)) throw error;
     return null;
   }
+}
+// Provider-search scope (mail/v1 `search`) to the one IMAP folder that holds
+// it, reusing the special-use finders so servers with renamed folders still
+// resolve. Scopes with no single folder (all/archive/starred) return null
+// for the whole-mailbox fallback.
+async function mailboxSearchFolder(
+  client: ImapFlow,
+  mailbox: ProviderMailboxSearch["mailbox"],
+): Promise<string | null> {
+  switch (mailbox) {
+    case "inbox":
+      return "INBOX";
+    case "sent":
+      return findSentFolder(client);
+    case "drafts":
+      return findDraftsFolder(client);
+    case "spam":
+      return findJunkFolder(client);
+    case "trash":
+      return findTrashFolder(client);
+    default:
+      return null;
+  }
+}
+
+// Provider-search scope to a query string for the whole-mailbox fallback.
+// Folder scoping has no query equivalent here (an `in:` token would be
+// dropped by parseSearchQuery), so only the text and flag filters carry
+// over; the candidates_require_local_filter contract re-applies the mailbox
+// scope locally.
+function mailboxSearchQuery(search: ProviderMailboxSearch): string {
+  const parts: string[] = [];
+  if (search.text) parts.push(mailboxSearchText(search));
+  if (search.read !== undefined)
+    parts.push(search.read ? "is:read" : "is:unread");
+  if (search.starred !== undefined)
+    parts.push(search.starred ? "is:starred" : "-is:starred");
+  if (search.hasAttachment) parts.push("has:attachment");
+  return parts.join(" ");
+}
+
+// Scoped provider search: SEARCH text + flag criteria in one folder, ranked
+// newest-first by INTERNALDATE like the listing, then sliced by offset.
+async function searchImapFolder(
+  client: ImapFlow,
+  options: {
+    folder: string;
+    search: ProviderMailboxSearch;
+    maxResults?: number;
+    pageToken?: string;
+  },
+): Promise<{ messages: ParsedMessage[]; nextPageToken?: string }> {
+  if (!(await openFolderSkippingNo(client, options.folder))) {
+    return { messages: [] };
+  }
+  const { criteria, hasAttachment } = parseSearchQuery(
+    mailboxSearchText(options.search),
+  );
+  if (options.search.read !== undefined)
+    criteria[options.search.read ? "seen" : "unseen"] = true;
+  if (options.search.starred) criteria.flagged = true;
+  // IMAP TEXT covers headers + body; the local filter re-applies the scope.
+  const { body, ...restCriteria } = criteria;
+  const searchCriteria =
+    options.search.text?.field === "any" && body !== undefined
+      ? { ...restCriteria, text: body }
+      : criteria;
+  const uids = await searchImapMessages(client, searchCriteria);
+  const dated = await fetchInternalDatesByUids(client, uids);
+  dated.sort((a, b) => b.time - a.time || b.uid - a.uid);
+  let candidates = dated;
+  const maxResults = options.maxResults || 20;
+  const offset = options.pageToken ? Number(options.pageToken) : 0;
+  if (hasAttachment || options.search.hasAttachment) {
+    await client.mailboxOpen(options.folder, { readOnly: true });
+    const fetched = await fetchMessagesByUids(
+      client,
+      dated.map((entry) => entry.uid),
+    );
+    const keep = new Set(
+      fetched
+        .filter((m) => m.attachments && m.attachments.length > 0)
+        .map((m) => m.id),
+    );
+    candidates = dated.filter((entry) =>
+      keep.has(encodeImapMessageId(options.folder, entry.uid)),
+    );
+  }
+  const pageUids = candidates
+    .slice(offset, offset + maxResults)
+    .map((entry) => entry.uid);
+  await client.mailboxOpen(options.folder, { readOnly: true });
+  const messages = await fetchMessagesByUids(client, pageUids);
+  const order = new Map(pageUids.map((uid, index) => [uid, index]));
+  messages.sort(
+    (a, b) =>
+      (order.get(parseImapMessageId(a.id).uid) ?? 0) -
+      (order.get(parseImapMessageId(b.id).uid) ?? 0),
+  );
+  return {
+    messages,
+    nextPageToken:
+      offset + maxResults < candidates.length
+        ? String(offset + maxResults)
+        : undefined,
+  };
+}
+
+// The free-text part of a provider search as a query string.
+function mailboxSearchText(search: ProviderMailboxSearch): string {
+  if (!search.text) return "";
+  const value = search.text.value.trim();
+  if (!value) return "";
+  if (search.text.field === "subject") return `subject:${value}`;
+  if (search.text.field === "body") return value;
+  return search.text.match === "phrase" ? `"${value}"` : value;
+}
+
+function groupImapSearchThreads(messages: ParsedMessage[]): EmailThread[] {
+  const threadMap = new Map<string, ParsedMessage[]>();
+  for (const msg of messages) {
+    const existing = threadMap.get(msg.threadId) || [];
+    existing.push(msg);
+    threadMap.set(msg.threadId, existing);
+  }
+  return [...threadMap.entries()].map(([id, msgs]) => ({
+    id,
+    messages: msgs,
+    snippet: msgs[msgs.length - 1].snippet,
+  }));
 }
 
 // Rank key for a fetched page member: the provider ids are folder-qualified

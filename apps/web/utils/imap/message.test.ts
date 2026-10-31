@@ -366,3 +366,12 @@ describe("convertImapMessage label ids", () => {
     expect(plain?.labelIds).not.toContain("SPAM");
   });
 });
+
+describe("parseSearchQuery mailbox scopes", () => {
+  it("drops in: scope tokens instead of searching them as body text", () => {
+    expect(parseSearchQuery("in:trash invoice").criteria).toEqual({
+      body: "invoice",
+    });
+    expect(parseSearchQuery("in:archive").criteria).toEqual({ all: true });
+  });
+});

@@ -250,6 +250,11 @@ function createFakeClient(
                 `${item.subject ?? ""} ${item.html ?? ""}`.toLowerCase();
               return haystack.includes(String(expected).toLowerCase());
             }
+            if (key === "text") {
+              const haystack =
+                `${item.subject ?? ""} ${item.html ?? ""} ${item.from ?? ""} ${item.to ?? ""}`.toLowerCase();
+              return haystack.includes(String(expected).toLowerCase());
+            }
             if (key === "or") {
               return (expected as Array<Record<string, unknown>>).some((part) =>
                 matches(item, part),
@@ -3641,5 +3646,133 @@ describe("ImapProvider Bridge shared-item placement (self-sent mail)", () => {
     const inbox = mailboxesOf(fake).INBOX.map((m) => m.messageId);
     const sent = mailboxesOf(fake).Sent.map((m) => m.messageId);
     expect([...inbox, ...sent]).toEqual([root]);
+  });
+});
+
+describe("ImapProvider scoped provider search", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  function scopedMailboxes() {
+    return createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, {
+            subject: "invoice January",
+          }),
+        ],
+      },
+      {
+        path: "Trash",
+        specialUse: "\\Trash",
+        messages: [
+          message(7, "2026-02-01", "bob@x", undefined, {
+            subject: "invoice February",
+          }),
+        ],
+      },
+    ]);
+  }
+
+  it("searches only the Trash folder for a trash mailbox scope", async () => {
+    const fake = scopedMailboxes();
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).searchMessages({
+      query: "",
+      mailboxSearch: {
+        mailbox: "trash",
+        text: { kind: "text", field: "any", value: "invoice", match: "term" },
+      },
+    });
+
+    expect([...new Set(fake.opened)]).toEqual(["Trash"]);
+    expect(result.messages.map((m) => m.id)).toEqual([qualifiedId("Trash", 7)]);
+  });
+
+  it("searches only the Sent folder for a sent mailbox scope", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, {
+            subject: "invoice January",
+          }),
+        ],
+      },
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [
+          message(3, "2026-03-01", "me@x", undefined, {
+            subject: "invoice March",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).searchMessages({
+      query: "",
+      mailboxSearch: {
+        mailbox: "sent",
+        text: { kind: "text", field: "any", value: "invoice", match: "term" },
+      },
+    });
+
+    expect([...new Set(fake.opened)]).toEqual(["Sent"]);
+    expect(result.messages.map((m) => m.id)).toEqual([qualifiedId("Sent", 3)]);
+  });
+
+  it("uses TEXT (not BODY) for field-any so subject matches hit", async () => {
+    const fake = scopedMailboxes();
+    connection.client = fake.client;
+
+    await new ImapProvider(config).searchMessages({
+      query: "",
+      mailboxSearch: {
+        mailbox: "trash",
+        text: { kind: "text", field: "any", value: "invoice", match: "term" },
+      },
+    });
+
+    const search = fake.client.search as unknown as {
+      mock: { calls: Array<[Record<string, unknown>]> };
+    };
+    const criteria = search.mock.calls.map(([c]) => c);
+    expect(criteria.some((c) => "text" in c)).toBe(true);
+    expect(criteria.some((c) => "body" in c)).toBe(false);
+  });
+
+  it("scopes legacy searchThreads to the trash folder", async () => {
+    const fake = scopedMailboxes();
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).searchThreads({
+      query: "invoice",
+      folder: "trash",
+    });
+
+    expect([...new Set(fake.opened)]).toEqual(["Trash"]);
+    expect(result.threads.flatMap((t) => t.messages.map((m) => m.id))).toEqual([
+      qualifiedId("Trash", 7),
+    ]);
+  });
+
+  it("includes trash and junk in the fan-out when asked", async () => {
+    const fake = scopedMailboxes();
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).searchThreads({
+      query: "invoice",
+      includeSpamTrash: true,
+    });
+
+    expect(new Set(fake.opened)).toEqual(new Set(["INBOX", "Trash"]));
+    expect(
+      result.threads.flatMap((t) => t.messages.map((m) => m.id)).sort(),
+    ).toEqual([qualifiedId("INBOX", 1), qualifiedId("Trash", 7)].sort());
   });
 });

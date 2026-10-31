@@ -502,8 +502,9 @@ export function parseSearchQuery(query: string): {
       addTerm({ flagged: true });
     } else if (part === "has:attachment") {
       hasAttachment = true;
-    } else if (field === "is" || field === "has") {
-      // Unknown is:/has: token: drop, never body text.
+    } else if (field === "is" || field === "has" || field === "in") {
+      // Unknown is:/has: token or a mailbox scope (in:trash) the folder
+      // fan-out already applied: drop, never body text.
     } else if (field === "from") {
       addTerm({ from: value });
     } else if (field === "to") {
