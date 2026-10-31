@@ -6,6 +6,7 @@ import {
   getRootMessageId,
   parseFallbackThreadId,
   parseMessageIdList,
+  parseThreadRootMessageId,
 } from "@/utils/imap/thread";
 
 describe("parseMessageIdList", () => {
@@ -133,19 +134,16 @@ describe("parseFallbackThreadId", () => {
 });
 
 describe("buildThreadId", () => {
-  it("returns consistent hash for same root message", () => {
-    const id1 = buildThreadId(
+  it("encodes the root Message-ID recoverably with a t. prefix", () => {
+    const id = buildThreadId(
       "<root@ex.com> <r1@ex.com>",
       "<r1@ex.com>",
       "<r2@ex.com>",
     );
-    const id2 = buildThreadId(
-      "<root@ex.com> <r1@ex.com> <r2@ex.com>",
-      "<r2@ex.com>",
-      "<r3@ex.com>",
+    expect(id).toBe(
+      `t.${Buffer.from("root@ex.com", "utf8").toString("base64url")}`,
     );
-    // Both should hash the same root: "root@ex.com"
-    expect(id1).toBe(id2);
+    expect(parseThreadRootMessageId(id)).toBe("root@ex.com");
   });
 
   it("hashes a root message and its reply to the same thread", () => {
@@ -154,15 +152,29 @@ describe("buildThreadId", () => {
     expect(root).toBe(reply);
   });
 
-  it("returns different hashes for different threads", () => {
+  it("returns different ids for different threads", () => {
     const id1 = buildThreadId("<thread1@ex.com>", undefined, undefined);
     const id2 = buildThreadId("<thread2@ex.com>", undefined, undefined);
     expect(id1).not.toBe(id2);
   });
 
-  it("returns a 24-character hex string", () => {
-    const id = buildThreadId("<msg@ex.com>", undefined, undefined);
-    expect(id).toMatch(/^[0-9a-f]{24}$/);
+  it("normalizes angle brackets and case before encoding", () => {
+    expect(buildThreadId(undefined, undefined, " <ABC@X> ")).toBe(
+      buildThreadId(undefined, undefined, "<abc@x>"),
+    );
+  });
+
+  it("parseThreadRootMessageId returns null for fallback ids", () => {
+    expect(
+      parseThreadRootMessageId(
+        buildThreadId(undefined, undefined, undefined, "9@SU5CT1g"),
+      ),
+    ).toBeNull();
+  });
+
+  it("parseThreadRootMessageId rejects malformed ids", () => {
+    expect(() => parseThreadRootMessageId("t.!!!")).toThrow();
+    expect(parseThreadRootMessageId("nope")).toBeNull();
   });
 });
 

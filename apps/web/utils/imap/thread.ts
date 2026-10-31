@@ -1,5 +1,11 @@
-import { createHash } from "node:crypto";
+import { SafeError } from "@/utils/error";
 import { parseImapMessageId } from "@/utils/imap/message-id";
+
+// Thread ids for messages with threading headers. The id is `t.` plus the
+// base64url-encoded normalized root Message-ID, so the root stays
+// recoverable and `fetchThreadMessages` can SEARCH for it directly instead
+// of scanning a newest-N window.
+const THREAD_ID_PREFIX = "t.";
 
 // Prefix for thread ids of header-less messages. The id carries the
 // folder-qualified listing key (`uid@base64url(folder)`, the same key as a
@@ -11,6 +17,8 @@ const FALLBACK_THREAD_PREFIX = "fallback:";
  * Build a deterministic thread ID from email threading headers.
  * Uses the root Message-ID from the References chain (first entry),
  * falling back to In-Reply-To, then the message's own Message-ID.
+ * The id encodes the normalized root, so callers can recover it with
+ * `parseThreadRootMessageId` and SEARCH for members directly.
  */
 export function buildThreadId(
   references: string | undefined,
@@ -21,12 +29,39 @@ export function buildThreadId(
   if (!references && !inReplyTo && !messageId) {
     // Header-less message: keep the per-message key in the thread id so the
     // folder + UID stay derivable without a mailbox scan. Without a key
-    // there is nothing unique to hash, so keep the legacy constant.
+    // there is nothing unique to encode, so keep the legacy constant.
     if (fallbackKey) return `${FALLBACK_THREAD_PREFIX}${fallbackKey}`;
-    return hashToThreadId("fallback");
+    return `${THREAD_ID_PREFIX}${Buffer.from("fallback", "utf8").toString("base64url")}`;
   }
-  const rootId = getRootMessageId(references, inReplyTo, messageId);
-  return hashToThreadId(rootId);
+  // Normalize (strip angle brackets/whitespace, lowercase): servers vary the
+  // header's case and spacing, but the thread must stay one thread.
+  const rootId = getRootMessageId(references, inReplyTo, messageId)
+    .replace(/^<|>$/g, "")
+    .trim()
+    .toLowerCase();
+  return `${THREAD_ID_PREFIX}${Buffer.from(rootId, "utf8").toString("base64url")}`;
+}
+
+/**
+ * Recover the normalized root Message-ID carried by a header-derived
+ * thread id. Returns null for header-less (`fallback:`) ids. Rejects
+ * malformed ids and empty roots so callers never SEARCH for a fabricated
+ * or unbounded-matching value.
+ */
+export function parseThreadRootMessageId(threadId: string): string | null {
+  if (threadId.startsWith(FALLBACK_THREAD_PREFIX)) return null;
+  if (!threadId.startsWith(THREAD_ID_PREFIX)) return null;
+  let root: string;
+  try {
+    root = Buffer.from(
+      threadId.slice(THREAD_ID_PREFIX.length),
+      "base64url",
+    ).toString("utf8");
+  } catch {
+    throw new SafeError("Thread id holds an undecodable root Message-ID");
+  }
+  if (!root) throw new SafeError("Thread id holds an empty root Message-ID");
+  return root;
 }
 
 /**
@@ -81,13 +116,6 @@ export function parseMessageIdList(header: string): string[] {
   }
 
   return ids;
-}
-
-/**
- * Hash a message ID to a fixed-length thread ID.
- */
-function hashToThreadId(messageId: string): string {
-  return createHash("sha256").update(messageId).digest("hex").slice(0, 24);
 }
 
 /**

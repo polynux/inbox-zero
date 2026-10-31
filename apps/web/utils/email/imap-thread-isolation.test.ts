@@ -83,9 +83,13 @@ function build(
       };
       return client.mailbox;
     },
-    fetch: (_range: string) =>
+    fetch: (range: string) =>
       (async function* () {
-        for (const m of mailboxes[state.opened]) yield envelopeOf(m);
+        const list = mailboxes[state.opened];
+        // Honor sequence ranges (`start:*`) so tests can place threads
+        // outside a listing window like the old newest-200 scan had.
+        const start = Number(range.split(":")[0]) || 1;
+        for (const m of list.slice(start - 1)) yield envelopeOf(m);
       })(),
     fetchOne: async (seq: string) => {
       const m = mailboxes[state.opened][Number(seq) - 1];
@@ -348,6 +352,60 @@ describe("header-less threads resolve without a full scan", () => {
 
     expect(messages).toHaveLength(1);
     expect(messages[0].id).toBe(encodeImapMessageId("INBOX", 9));
+  });
+});
+
+describe("thread lookup via HEADER search", () => {
+  it("finds a thread whose members are all older than any listing window", async () => {
+    // 210 filler messages bury the two thread members past message 200, so
+    // a newest-N scan alone never sees the thread; HEADER search must.
+    const fillers = Array.from({ length: 210 }, (_, index) => ({
+      uid: 100 + index,
+      subject: `filler ${100 + index}`,
+      messageId: `<filler${100 + index}@x>`,
+    }));
+    const { client } = build(
+      {
+        INBOX: [
+          { uid: 1, subject: "ancient root", messageId: "<ancient@x>" },
+          {
+            uid: 2,
+            subject: "ancient reply",
+            messageId: "<ancient-reply@x>",
+            inReplyTo: "<ancient@x>",
+          },
+          ...fillers,
+        ],
+      },
+      {},
+    );
+    connection.client = client;
+
+    const threadId = buildThreadId(undefined, undefined, "<ancient@x>");
+    const messages = await new ImapProvider(config).getThreadMessages(threadId);
+
+    expect(messages.map((m) => m.subject).sort()).toEqual([
+      "ancient reply",
+      "ancient root",
+    ]);
+  });
+
+  it("filters substring false-positives from HEADER search", async () => {
+    const { client } = build(
+      {
+        INBOX: [
+          { uid: 1, subject: "exact root", messageId: "<root@x>" },
+          { uid: 2, subject: "lookalike", messageId: "<root@x-body>" },
+        ],
+      },
+      {},
+    );
+    connection.client = client;
+
+    const threadId = buildThreadId(undefined, undefined, "<root@x>");
+    const messages = await new ImapProvider(config).getThreadMessages(threadId);
+
+    expect(messages.map((m) => m.subject)).toEqual(["exact root"]);
   });
 });
 

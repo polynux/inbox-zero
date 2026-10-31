@@ -65,6 +65,7 @@ import {
   buildThreadId,
   getAllThreadMessageIds,
   parseFallbackThreadId,
+  parseThreadRootMessageId,
 } from "@/utils/imap/thread";
 import { extractEmailAddress, splitRecipientList } from "@/utils/email";
 import { createScopedLogger } from "@/utils/logger";
@@ -1841,17 +1842,16 @@ function groupMessageIdsByFolder(
 
 /**
  * Resolve every message of a thread across the whole account. A thread id
- * is the hash of its root Message-ID, so SEARCH the Message-ID, References
- * and In-Reply-To headers for any member, follow each hit's reference chain
- * to the other members, and fetch them wherever they live. Members found by
- * an exact thread-id match are exact; header SEARCH is substring-based, so
- * candidates are re-verified before acting on them. Members key by full id
- * (folder+UID): UIDs repeat across folders. Trash and Junk are scanned only
- * when the caller asks for them (untrash/markNotSpam); every other thread
- * operation must not act on a deleted reply. Limitation: only the newest 200
- * messages per folder are scanned, so "thread not found" can mean the
- * thread's members are all older than that window and unlinked by
- * references.
+ * carries its normalized root Message-ID (`t.` + base64url), so SEARCH the
+ * Message-ID, References and In-Reply-To headers for the root directly —
+ * no newest-N scan. Members key by full id (folder+UID): UIDs repeat
+ * across folders. HEADER SEARCH is substring-based, so candidates are
+ * re-verified by recomputing the thread id exactly. One hop of expansion
+ * follows members that reference a found member but not the root (a reply
+ * quoting a sibling quotes the sibling's id, not the root's). Trash and
+ * Junk are scanned only when the caller asks for them
+ * (untrash/markNotSpam); every other thread operation must not act on a
+ * deleted reply.
  */
 async function fetchThreadMessages(
   client: ImapFlow,
@@ -1860,8 +1860,7 @@ async function fetchThreadMessages(
 ): Promise<ParsedMessage[]> {
   // Header-less messages keep their folder-qualified listing key
   // (`uid@base64url(folder)`) in the thread id, so the owning message is
-  // fetchable directly — no scan needed, and on Proton (where only `\All` is
-  // scanned) the key still names the folder the caller originally listed.
+  // fetchable directly — no search needed.
   const fallback = parseFallbackThreadId(threadId);
   if (fallback) {
     await client.mailboxOpen(fallback.folder, { readOnly: true });
@@ -1869,39 +1868,42 @@ async function fetchThreadMessages(
     return direct ? [direct] : [];
   }
 
+  const root = parseThreadRootMessageId(threadId);
+  if (!root) return [];
+
   const folders = await resolveSearchFolders(client, options);
   const byUid = new Map<string, ParsedMessage>();
 
   for (const folder of folders) {
     await client.mailboxOpen(folder, { readOnly: true });
-    // One scan per folder: the thread id is only computable from the
-    // References/In-Reply-To/Message-ID headers, which SEARCH cannot see,
-    // so fetch envelopes and match locally. Newest 200 covers active
-    // threads; older members are picked up via their references below.
-    if (!client.mailbox) continue;
-    const recent = await fetchRecentMessages(client, client.mailbox, 200);
-    for (const message of recent) {
-      if (message.threadId === threadId) byUid.set(message.id, message);
-    }
+    const candidates = await searchImapMessages(client, {
+      or: [
+        { header: { "Message-ID": root } },
+        { header: { References: root } },
+        { header: { "In-Reply-To": root } },
+      ],
+    });
+    const verified = await filterThreadCandidates(client, candidates, threadId);
+    for (const message of verified) byUid.set(message.id, message);
   }
 
-  // Follow reference chains: a member's headers name the other members'
-  // Message-IDs, so SEARCH for those IDs to find members the scan missed
-  // (older than the 200 window, or archived/trashed elsewhere).
-  const wantedMessageIds = new Set<string>();
+  // One hop: a message that references a member but not the root (a reply
+  // quoting a sibling's id) is still part of the thread.
+  const memberIds = new Set<string>();
   for (const message of byUid.values()) {
     for (const id of getAllThreadMessageIds(
       message.headers.references,
       message.headers["in-reply-to"],
       message.headers["message-id"],
     )) {
-      wantedMessageIds.add(id);
+      memberIds.add(id.toLowerCase());
     }
   }
+  memberIds.delete(root.toLowerCase());
 
   for (const folder of folders) {
     await client.mailboxOpen(folder, { readOnly: true });
-    for (const messageId of wantedMessageIds) {
+    for (const messageId of memberIds) {
       const candidates = await searchImapMessages(client, {
         or: [
           { header: { "Message-ID": messageId } },
@@ -1914,16 +1916,7 @@ async function fetchThreadMessages(
         candidates,
         threadId,
       );
-      for (const message of verified) {
-        byUid.set(message.id, message);
-        for (const id of getAllThreadMessageIds(
-          message.headers.references,
-          message.headers["in-reply-to"],
-          message.headers["message-id"],
-        )) {
-          wantedMessageIds.add(id);
-        }
-      }
+      for (const message of verified) byUid.set(message.id, message);
     }
   }
 

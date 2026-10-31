@@ -847,12 +847,14 @@ describe("ImapProvider unknown threads", () => {
     });
     connection.client = fake.client;
     const provider = new ImapProvider(config);
+    // Well-formed but unknown: resolution reaches the failing mailboxOpen.
+    const ghost = buildThreadId(undefined, undefined, "<ghost@x>");
 
+    await expect(provider.archiveThread(ghost, "owner@x.com")).rejects.toThrow(
+      /not found/i,
+    );
     await expect(
-      provider.archiveThread("any-thread", "owner@x.com"),
-    ).rejects.toThrow(/not found/i);
-    await expect(
-      provider.trashThread("any-thread", "owner@x.com", "user"),
+      provider.trashThread(ghost, "owner@x.com", "user"),
     ).rejects.toThrow(/not found/i);
   });
 
