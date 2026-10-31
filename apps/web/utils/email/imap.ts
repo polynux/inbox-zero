@@ -734,6 +734,10 @@ export class ImapProvider implements EmailProvider {
   async archiveMessage(messageId: string): Promise<void> {
     const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
+      if ((await isProtonBridgeLayout(client)) && isFallbackViewFolder(folder))
+        throw new SafeError(
+          `Cannot archive a message in a Proton view mailbox (${folder})`,
+        );
       const archiveFolder = await findArchiveFolder(client);
       if (folder === archiveFolder) return;
       await client.mailboxOpen(folder);
@@ -1380,8 +1384,15 @@ ${messageContent}
   ): Promise<void> {
     return this.withConnection(async (client) => {
       const archiveFolder = await findArchiveFolder(client);
+      const onBridge = await isProtonBridgeLayout(client);
       for (const messageId of new Set(messageIds)) {
         const { folder, uid } = parseImapMessageId(messageId);
+        if (onBridge && isFallbackViewFolder(folder)) {
+          this.logger.warn("IMAP archiveMessages skipping Bridge view id", {
+            messageId,
+          });
+          continue;
+        }
         if (folder === archiveFolder) continue;
         await client.mailboxOpen(folder);
         try {
@@ -1400,8 +1411,15 @@ ${messageContent}
 
   async unarchiveMessages(messageIds: string[]): Promise<void> {
     return this.withConnection(async (client) => {
+      const onBridge = await isProtonBridgeLayout(client);
       for (const messageId of new Set(messageIds)) {
         const { folder, uid } = parseImapMessageId(messageId);
+        if (onBridge && isFallbackViewFolder(folder)) {
+          this.logger.warn("IMAP unarchiveMessages skipping Bridge view id", {
+            messageId,
+          });
+          continue;
+        }
         if (folder === "INBOX") continue;
         await client.mailboxOpen(folder);
         await moveMessageToFolder(client, uid, "INBOX");
@@ -1413,8 +1431,15 @@ ${messageContent}
     return this.withConnection(async (client) => {
       const trashFolder = await findTrashFolder(client);
       if (!trashFolder) return;
+      const onBridge = await isProtonBridgeLayout(client);
       for (const messageId of new Set(messageIds)) {
         const { folder, uid } = parseImapMessageId(messageId);
+        if (onBridge && isFallbackViewFolder(folder)) {
+          this.logger.warn("IMAP trashMessages skipping Bridge view id", {
+            messageId,
+          });
+          continue;
+        }
         if (folder === trashFolder) continue;
         await client.mailboxOpen(folder);
         try {
@@ -1428,8 +1453,15 @@ ${messageContent}
 
   async untrashMessages(messageIds: string[]): Promise<void> {
     return this.withConnection(async (client) => {
+      const onBridge = await isProtonBridgeLayout(client);
       for (const messageId of new Set(messageIds)) {
         const { folder, uid } = parseImapMessageId(messageId);
+        if (onBridge && isFallbackViewFolder(folder)) {
+          this.logger.warn("IMAP untrashMessages skipping Bridge view id", {
+            messageId,
+          });
+          continue;
+        }
         if (folder === "INBOX") continue;
         await client.mailboxOpen(folder);
         await moveMessageToFolder(client, uid, "INBOX");
@@ -1442,8 +1474,15 @@ ${messageContent}
     read: boolean,
   ): Promise<void> {
     return this.withConnection(async (client) => {
+      const onBridge = await isProtonBridgeLayout(client);
       for (const messageId of new Set(messageIds)) {
         const { folder, uid } = parseImapMessageId(messageId);
+        if (onBridge && isFallbackViewFolder(folder)) {
+          this.logger.warn("IMAP markMessagesReadState skipping view id", {
+            messageId,
+          });
+          continue;
+        }
         await client.mailboxOpen(folder);
         try {
           if (read) {
@@ -1467,8 +1506,15 @@ ${messageContent}
     starred: boolean,
   ): Promise<void> {
     return this.withConnection(async (client) => {
+      const onBridge = await isProtonBridgeLayout(client);
       for (const messageId of new Set(messageIds)) {
         const { folder, uid } = parseImapMessageId(messageId);
+        if (onBridge && isFallbackViewFolder(folder)) {
+          this.logger.warn("IMAP markMessagesStarredState skipping view id", {
+            messageId,
+          });
+          continue;
+        }
         await client.mailboxOpen(folder);
         try {
           if (starred) {
@@ -1492,6 +1538,10 @@ ${messageContent}
   async starMessage(messageId: string): Promise<void> {
     const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
+      if ((await isProtonBridgeLayout(client)) && isFallbackViewFolder(folder))
+        throw new SafeError(
+          `Cannot star a message in a Proton view mailbox (${folder})`,
+        );
       await client.mailboxOpen(folder);
       await client.messageFlagsAdd(String(uid), ["\\Flagged"], {
         uid: true,
@@ -1704,6 +1754,10 @@ ${messageContent}
   async getMessageSource(messageId: string): Promise<Buffer> {
     const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
+      if ((await isProtonBridgeLayout(client)) && isFallbackViewFolder(folder))
+        throw new SafeError(
+          `Cannot read a message in a Proton view mailbox (${folder})`,
+        );
       await client.mailboxOpen(folder, { readOnly: true });
       const downloaded = await client.download(String(uid), undefined, {
         uid: true,
@@ -1742,6 +1796,10 @@ ${messageContent}
   ): Promise<Buffer> {
     const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
+      if ((await isProtonBridgeLayout(client)) && isFallbackViewFolder(folder))
+        throw new SafeError(
+          `Cannot read a message in a Proton view mailbox (${folder})`,
+        );
       await client.mailboxOpen(folder, { readOnly: true });
       const listed = await client.fetchOne(
         String(uid),

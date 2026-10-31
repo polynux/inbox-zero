@@ -236,6 +236,8 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       const target = mailboxes.find((candidate) => candidate.path === folder);
       target?.messages.push(moved);
     }),
+    messageFlagsAdd: vi.fn(async () => true),
+    messageFlagsRemove: vi.fn(async () => true),
     fetch: vi.fn((range: string, query?: Record<string, unknown>) => {
       fetchQueries.push(query);
       const [start, end] = range.split(":");
@@ -2124,6 +2126,92 @@ describe("ImapProvider Proton label edge cases", () => {
       },
     );
     expect(fake.client.mailboxCreate).not.toHaveBeenCalled();
+  });
+
+  it("message-id mutators skip Bridge view ids and reads throw", async () => {
+    const viewId = qualifiedId("All Mail", 40);
+    const cases: Array<{
+      name: string;
+      run: (provider: ImapProvider) => Promise<unknown>;
+      throws: boolean;
+    }> = [
+      {
+        name: "archiveMessages",
+        run: (p) => p.archiveMessages([viewId]),
+        throws: false,
+      },
+      {
+        name: "unarchiveMessages",
+        run: (p) => p.unarchiveMessages([viewId]),
+        throws: false,
+      },
+      {
+        name: "trashMessages",
+        run: (p) => p.trashMessages([viewId]),
+        throws: false,
+      },
+      {
+        name: "untrashMessages",
+        run: (p) => p.untrashMessages([viewId]),
+        throws: false,
+      },
+      {
+        name: "markMessagesReadState",
+        run: (p) => p.markMessagesReadState([viewId], true),
+        throws: false,
+      },
+      {
+        name: "markMessagesStarredState",
+        run: (p) => p.markMessagesStarredState([viewId], true),
+        throws: false,
+      },
+      {
+        name: "archiveMessage",
+        run: (p) => p.archiveMessage(viewId),
+        throws: true,
+      },
+      {
+        name: "starMessage",
+        run: (p) => p.starMessage(viewId),
+        throws: true,
+      },
+      {
+        name: "getMessageSource",
+        run: (p) => p.getMessageSource(viewId),
+        throws: true,
+      },
+      {
+        name: "getAttachment",
+        run: (p) => p.getAttachment(viewId, "2"),
+        throws: true,
+      },
+    ];
+
+    for (const { name, run, throws } of cases) {
+      const fake = createFakeClient(
+        bridgeWithLabels([{ path: "Labels/Work", messages: [] }]).map(
+          (mailbox) =>
+            mailbox.path === "All Mail"
+              ? {
+                  ...mailbox,
+                  messages: [message(40, "2026-07-01", "alice@x")],
+                }
+              : mailbox,
+        ),
+      );
+      connection.client = fake.client;
+      const provider = new ImapProvider(config);
+
+      if (throws) {
+        await expect(run(provider), name).rejects.toThrow(/view mailbox/i);
+      } else {
+        await expect(run(provider), name).resolves.toBeUndefined();
+      }
+      expect(fake.opened, name).not.toContain("All Mail");
+      expect(fake.client.messageMove, name).not.toHaveBeenCalled();
+      expect(fake.client.messageFlagsAdd, name).not.toHaveBeenCalled();
+      expect(fake.client.messageFlagsRemove, name).not.toHaveBeenCalled();
+    }
   });
 });
 
