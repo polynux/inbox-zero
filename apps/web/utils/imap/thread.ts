@@ -28,10 +28,10 @@ export function buildThreadId(
 ): string {
   if (!references && !inReplyTo && !messageId) {
     // Header-less message: keep the per-message key in the thread id so the
-    // folder + UID stay derivable without a mailbox scan. Without a key
-    // there is nothing unique to encode, so keep the legacy constant.
-    if (fallbackKey) return `${FALLBACK_THREAD_PREFIX}${fallbackKey}`;
-    return `${THREAD_ID_PREFIX}${Buffer.from("fallback", "utf8").toString("base64url")}`;
+    // folder + UID stay derivable without a mailbox scan. The key is
+    // required; callers always have the listing key.
+    if (!fallbackKey) throw new SafeError("Thread id needs a fallback key");
+    return `${FALLBACK_THREAD_PREFIX}${fallbackKey}`;
   }
   // Normalize (strip angle brackets/whitespace, lowercase): servers vary the
   // header's case and spacing, but the thread must stay one thread.
@@ -45,22 +45,22 @@ export function buildThreadId(
 /**
  * Recover the normalized root Message-ID carried by a header-derived
  * thread id. Returns null for header-less (`fallback:`) ids. Rejects
- * malformed ids and empty roots so callers never SEARCH for a fabricated
- * or unbounded-matching value.
+ * malformed ids and implausible roots so callers never SEARCH for a
+ * fabricated or unbounded-matching value.
  */
 export function parseThreadRootMessageId(threadId: string): string | null {
   if (threadId.startsWith(FALLBACK_THREAD_PREFIX)) return null;
   if (!threadId.startsWith(THREAD_ID_PREFIX)) return null;
-  let root: string;
-  try {
-    root = Buffer.from(
-      threadId.slice(THREAD_ID_PREFIX.length),
-      "base64url",
-    ).toString("utf8");
-  } catch {
-    throw new SafeError("Thread id holds an undecodable root Message-ID");
-  }
-  if (!root) throw new SafeError("Thread id holds an empty root Message-ID");
+  const root = Buffer.from(
+    threadId.slice(THREAD_ID_PREFIX.length),
+    "base64url",
+  ).toString("utf8");
+  // The decoded root becomes a SEARCH term, and gluon matches substrings:
+  // a one-character root fans out over the whole mailbox. `Buffer.from(x,
+  // "base64url")` never throws on bad input, so decodability alone proves
+  // nothing — require something shaped like a Message-ID.
+  if (root.length < 3 || !root.includes("@") || /\s/.test(root))
+    throw new SafeError("Thread id holds an implausible root Message-ID");
   return root;
 }
 

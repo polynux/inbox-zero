@@ -178,10 +178,7 @@ export async function findDraftsFolder(
 }
 
 /**
- * Find the all-mail mailbox. Proton Bridge's "All Mail" carries no \All
- * flag, so fall back to an exact path match ("All Mail" itself or a path
- * ending in "/All Mail", e.g. "[Gmail]/All Mail") only when no mailbox
- * advertises \All.
+ * Find the all-mail mailbox, listing first.
  */
 export async function findAllMailFolder(
   client: ImapFlow,
@@ -189,8 +186,13 @@ export async function findAllMailFolder(
   return findAllMailInList(await client.list());
 }
 
-// Pure scan over one LIST result, so callers that already hold the listing
-// (e.g. resolveSearchFolders) don't LIST twice.
+/**
+ * Pure scan over one LIST result, so callers that already hold the listing
+ * (e.g. resolveSearchFolders) don't LIST twice. Proton Bridge's "All Mail"
+ * carries no \All flag, so fall back to an exact path match ("All Mail"
+ * itself or a path ending in "/All Mail", e.g. "[Gmail]/All Mail") only
+ * when no mailbox advertises \All.
+ */
 export function findAllMailInList(mailboxes: ListResponse[]): string | null {
   const flagged = mailboxes.find((mb) => mb.specialUse === "\\All");
   if (flagged) return flagged.path;
@@ -202,6 +204,10 @@ export function findAllMailInList(mailboxes: ListResponse[]): string | null {
 
   return null;
 }
+/**
+ * Find the junk folder path.
+ * Returns null when the server lists no junk mailbox.
+ */
 export async function findJunkFolder(client: ImapFlow): Promise<string | null> {
   const mailboxes = await client.list();
 
@@ -219,15 +225,33 @@ export async function findJunkFolder(client: ImapFlow): Promise<string | null> {
   return null;
 }
 
-// Proton label namespace: a top-level `Labels` mailbox (with children)
-// means labels are views, not locations. A message lives in exactly one
-// real folder and additionally appears in Labels/* mailboxes; COPY into
-// Labels/X applies a label, expunging from Labels/X removes it.
-export async function hasLabelNamespace(client: ImapFlow): Promise<boolean> {
-  const mailboxes = await client.list();
-  return mailboxes.some(
-    (mb) => mb.path === "Labels" || mb.path.startsWith("Labels/"),
+// Proton label namespace is really the whole Bridge layout: top-level
+// `Folders`, `Labels` and `All Mail` with no `\All` flag anywhere (live
+// Bridge probe 2026-10-31). A message lives in exactly one real folder and
+// additionally appears in Labels/* mailboxes; COPY into Labels/X applies a
+// label, expunging from Labels/X removes it. One stray user folder named
+// `Labels` or `All Mail` must not flip label or thread-resolution behavior.
+export async function isProtonBridgeLayout(client: ImapFlow): Promise<boolean> {
+  return isProtonBridgeLayoutInList(await client.list());
+}
+
+// Single predicate for the Proton Bridge mailbox layout. `delimiter` splits
+// nested paths, so `[Gmail]/All Mail` style subfolders never count as
+// top-level.
+export function isProtonBridgeLayoutInList(mailboxes: ListResponse[]): boolean {
+  const topLevel = new Set(
+    mailboxes
+      .filter((mb) => !mb.path.includes(mb.delimiter || "/"))
+      .map((mb) => mb.path),
   );
+  if (
+    !topLevel.has("INBOX") ||
+    !topLevel.has("Folders") ||
+    !topLevel.has("Labels") ||
+    !topLevel.has("All Mail")
+  )
+    return false;
+  return !mailboxes.some((mb) => mb.specialUse === "\\All");
 }
 
 export async function listLabelMailboxes(client: ImapFlow): Promise<string[]> {

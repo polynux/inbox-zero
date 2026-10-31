@@ -18,6 +18,7 @@ type FakeMessage = {
   to?: string;
   messageId?: string;
   inReplyTo?: string;
+  references?: string;
 };
 
 type FakeMailbox = {
@@ -46,7 +47,7 @@ function message(
   date: string,
   from?: string,
   to?: string,
-  headers?: { messageId?: string; inReplyTo?: string },
+  headers?: { messageId?: string; inReplyTo?: string; references?: string },
 ): FakeMessage {
   return { uid, date, from, to, ...headers };
 }
@@ -73,6 +74,14 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
   const sequenceOf = (message: FakeMessage) =>
     current.messages.indexOf(message) + 1;
 
+  // The real ENVELOPE never carries References: it arrives via a
+  // HEADER.FIELDS fetch (listings, thread resolution) or the full download
+  // (getMessage). The fake surfaces it as a raw header buffer the same way.
+  function headersOf(message: FakeMessage): Buffer | undefined {
+    if (!message.references) return;
+    return Buffer.from(`References: ${message.references}\r\n`);
+  }
+
   function fetched(message: FakeMessage) {
     return {
       uid: message.uid,
@@ -85,7 +94,23 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
         inReplyTo: message.inReplyTo,
       },
       flags: new Set<string>(),
+      headers: headersOf(message),
     };
+  }
+
+  function rawOf(message: FakeMessage): string {
+    const lines = [
+      `From: ${message.from ?? `${message.uid}@example.com`}`,
+      `To: ${message.to ?? "owner@example.com"}`,
+      `Subject: message ${message.uid}`,
+      `Date: ${new Date(message.date).toUTCString()}`,
+      message.messageId ? `Message-ID: ${message.messageId}` : "",
+      message.inReplyTo ? `In-Reply-To: ${message.inReplyTo}` : "",
+      message.references ? `References: ${message.references}` : "",
+      "MIME-Version: 1.0",
+      "Content-Type: text/plain; charset=utf-8",
+    ].filter(Boolean);
+    return `${lines.join("\r\n")}\r\n\r\nbody of message ${message.uid}\r\n`;
   }
 
   const client = {
@@ -132,7 +157,7 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
           const needle = String(value).replace(/^<|>$/g, "");
           return current.messages
             .filter((item) =>
-              [item.messageId, item.inReplyTo].some((id) =>
+              [item.messageId, item.inReplyTo, item.references].some((id) =>
                 id?.replace(/^<|>$/g, "").includes(needle),
               ),
             )
@@ -157,7 +182,7 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
           );
           return current.messages
             .filter((item) =>
-              [item.messageId, item.inReplyTo].some((id) =>
+              [item.messageId, item.inReplyTo, item.references].some((id) =>
                 needles.some((n) => id?.replace(/^<|>$/g, "").includes(n)),
               ),
             )
@@ -193,6 +218,17 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
         },
       };
     }),
+    download: vi.fn(
+      async (range: string, _part?: string, options?: { uid?: boolean }) => {
+        const pick = options?.uid
+          ? current.messages.find((item) => item.uid === Number(range))
+          : current.messages[Number(range) - 1];
+        const content = (async function* () {
+          if (pick) yield Buffer.from(rawOf(pick));
+        })();
+        return { content };
+      },
+    ),
   };
 
   (
@@ -280,15 +316,26 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
         path: "INBOX",
         messages: [message(1, "2026-01-01"), message(2, "2026-03-01")],
       },
+      { path: "Sent", specialUse: "\\Sent", messages: [] },
+      { path: "Drafts", specialUse: "\\Drafts", messages: [] },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+      { path: "Spam", specialUse: "\\Junk", messages: [] },
+      { path: "Trash", specialUse: "\\Trash", messages: [] },
       {
         path: "All Mail",
         messages: [message(40, "2026-07-01"), message(41, "2026-08-01")],
       },
+      { path: "Folders", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
       {
         path: "Labels/Work",
         messages: [message(41, "2026-08-01")],
       },
-      { path: "Starred", messages: [message(41, "2026-08-01")] },
+      {
+        path: "Starred",
+        specialUse: "\\Flagged",
+        messages: [message(41, "2026-08-01")],
+      },
     ]);
     connection.client = fake.client;
 
@@ -1118,8 +1165,16 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
           }),
         ],
       },
+      { path: "Sent", specialUse: "\\Sent", messages: [] },
+      { path: "Drafts", specialUse: "\\Drafts", messages: [] },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+      { path: "Spam", specialUse: "\\Junk", messages: [] },
+      { path: "Trash", specialUse: "\\Trash", messages: [] },
+      { path: "All Mail", messages: [] },
+      { path: "Folders", flags: ["\\Noselect"], messages: [] },
       { path: "Labels", flags: ["\\Noselect"], messages: [] },
       { path: "Labels/Work", messages: [] },
+      { path: "Starred", specialUse: "\\Flagged", messages: [] },
     ];
   }
 
@@ -1156,17 +1211,9 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
   });
 
   it("creates Labels/X on apply when it does not exist", async () => {
-    const fake = createFakeClient([
-      {
-        path: "INBOX",
-        messages: [
-          message(1, "2026-01-01", "a@x.com", undefined, {
-            messageId: "<root@x>",
-          }),
-        ],
-      },
-      { path: "Labels", flags: ["\\Noselect"], messages: [] },
-    ]);
+    const fake = createFakeClient(
+      protonMailboxes().filter((mailbox) => mailbox.path !== "Labels/Work"),
+    );
     fake.client.mailboxCreate = vi.fn(async (path: string) => {
       mailboxesOf(fake)[path] = [];
     });
@@ -1194,11 +1241,15 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
     const labeled = message(9, "2026-01-01", "a@x.com", undefined, {
       messageId: "<root@x>",
     });
-    const fake = createFakeClient([
-      { path: "INBOX", messages: [root] },
-      { path: "Labels", flags: ["\\Noselect"], messages: [] },
-      { path: "Labels/Work", messages: [labeled] },
-    ]);
+    const fake = createFakeClient(
+      protonMailboxes().map((mailbox) =>
+        mailbox.path === "INBOX"
+          ? { ...mailbox, messages: [root] }
+          : mailbox.path === "Labels/Work"
+            ? { ...mailbox, messages: [labeled] }
+            : mailbox,
+      ),
+    );
     const deleted: Array<{ uid: number; folder: string }> = [];
     fake.client.messageDelete = vi.fn(async (uid: string) => {
       deleted.push({ uid: Number(uid), folder: fake.opened.at(-1) || "" });
@@ -1283,18 +1334,13 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
     const labeled = message(9, "2026-01-01", "a@x.com", undefined, {
       messageId: "<root@x>",
     });
-    const fake = createFakeClient([
-      {
-        path: "INBOX",
-        messages: [
-          message(1, "2026-01-01", "a@x.com", undefined, {
-            messageId: "<root@x>",
-          }),
-        ],
-      },
-      { path: "Labels", flags: ["\\Noselect"], messages: [] },
-      { path: "Labels/Work", messages: [labeled] },
-    ]);
+    const fake = createFakeClient(
+      protonMailboxes().map((mailbox) =>
+        mailbox.path === "Labels/Work"
+          ? { ...mailbox, messages: [labeled] }
+          : mailbox,
+      ),
+    );
     connection.client = fake.client;
 
     const threads = await new ImapProvider(config).getThreadsWithLabel({
@@ -1314,17 +1360,17 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
     const labeledBills = message(11, "2026-01-01", "a@x.com", undefined, {
       messageId: "<root@x>",
     });
+    const labeledRoot = message(1, "2026-01-01", "a@x.com", undefined, {
+      messageId: "<root@x>",
+    });
     const fake = createFakeClient([
-      {
-        path: "INBOX",
-        messages: [
-          message(1, "2026-01-01", "a@x.com", undefined, {
-            messageId: "<root@x>",
-          }),
-        ],
-      },
-      { path: "Labels", flags: ["\\Noselect"], messages: [] },
-      { path: "Labels/Work", messages: [labeledWork] },
+      ...protonMailboxes().map((mailbox) =>
+        mailbox.path === "INBOX"
+          ? { ...mailbox, messages: [labeledRoot] }
+          : mailbox.path === "Labels/Work"
+            ? { ...mailbox, messages: [labeledWork] }
+            : mailbox,
+      ),
       { path: "Labels/Bills", messages: [labeledBills] },
     ]);
     const deleted: Array<{ uid: number; folder: string }> = [];
@@ -1351,16 +1397,7 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
 
   it("archiveThreadWithLabel keeps MOVE semantics for folders on Proton", async () => {
     const fake = createFakeClient([
-      {
-        path: "INBOX",
-        messages: [
-          message(1, "2026-01-01", "a@x.com", undefined, {
-            messageId: "<root@x>",
-          }),
-        ],
-      },
-      { path: "Labels", flags: ["\\Noselect"], messages: [] },
-      { path: "Labels/Work", messages: [] },
+      ...protonMailboxes(),
       { path: "Folders/Archive", messages: [] },
     ]);
     const moved: Array<{ uid: number; to: string; from: string }> = [];

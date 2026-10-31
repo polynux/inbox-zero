@@ -6,7 +6,9 @@ import {
   findDraftsFolder,
   findJunkFolder,
   findSentFolder,
-  hasLabelNamespace,
+  findTrashFolder,
+  isProtonBridgeLayout,
+  isProtonBridgeLayoutInList,
   labelNameFromPath,
   labelPathFromName,
   listLabelMailboxes,
@@ -136,25 +138,97 @@ describe("findJunkFolder", () => {
   });
 });
 
-describe("Proton label namespace", () => {
-  it("detects a Labels namespace and lists only its children", async () => {
+describe("findTrashFolder", () => {
+  it("returns the special-use trash mailbox", async () => {
     const { client } = mockClient([
       mailbox("INBOX"),
-      mailbox("Labels"),
-      mailbox("Labels/Work"),
-      mailbox("Labels/Receipts"),
+      mailbox("Papierkorb", "\\Trash"),
     ]);
-    await expect(hasLabelNamespace(client)).resolves.toBe(true);
+    await expect(findTrashFolder(client)).resolves.toBe("Papierkorb");
+  });
+
+  it("returns a folder whose name matches a known trash name", async () => {
+    const { client } = mockClient([mailbox("INBOX"), mailbox("Deleted Items")]);
+    await expect(findTrashFolder(client)).resolves.toBe("Deleted Items");
+  });
+
+  it("returns null when the LIST result has no trash mailbox", async () => {
+    const { client } = mockClient([mailbox("INBOX"), mailbox("Archive")]);
+    await expect(findTrashFolder(client)).resolves.toBeNull();
+  });
+});
+
+function bridgeMailboxes(extra: ListResponse[] = []): ListResponse[] {
+  return [
+    mailbox("INBOX"),
+    mailbox("Sent"),
+    mailbox("Drafts"),
+    mailbox("Archive"),
+    mailbox("Spam"),
+    mailbox("Trash"),
+    mailbox("All Mail"),
+    mailbox("Folders"),
+    mailbox("Folders/Projets"),
+    mailbox("Labels"),
+    mailbox("Labels/Work"),
+    mailbox("Labels/Receipts"),
+    mailbox("Starred"),
+    ...extra,
+  ];
+}
+
+describe("isProtonBridgeLayout", () => {
+  it("detects the full Bridge layout and lists only its label children", async () => {
+    const { client } = mockClient(bridgeMailboxes());
+    await expect(isProtonBridgeLayout(client)).resolves.toBe(true);
     await expect(listLabelMailboxes(client)).resolves.toEqual([
       "Labels/Work",
       "Labels/Receipts",
     ]);
   });
 
-  it("reports no namespace for plain folders", async () => {
+  it("reports no layout for plain folders", async () => {
     const { client } = mockClient([mailbox("INBOX"), mailbox("Projects")]);
-    await expect(hasLabelNamespace(client)).resolves.toBe(false);
+    await expect(isProtonBridgeLayout(client)).resolves.toBe(false);
     await expect(listLabelMailboxes(client)).resolves.toEqual([]);
+  });
+
+  it("ignores a lone user folder named Labels (keeps MOVE semantics)", () => {
+    expect(
+      isProtonBridgeLayoutInList([
+        mailbox("INBOX"),
+        mailbox("Labels"),
+        mailbox("Projects"),
+      ]),
+    ).toBe(false);
+  });
+
+  it("ignores a lone user folder named All Mail (still fans out)", () => {
+    expect(
+      isProtonBridgeLayoutInList([
+        mailbox("INBOX"),
+        mailbox("All Mail"),
+        mailbox("Archive"),
+      ]),
+    ).toBe(false);
+  });
+
+  it("rejects the layout when any mailbox advertises All", () => {
+    expect(
+      isProtonBridgeLayoutInList([
+        ...bridgeMailboxes(),
+        mailbox("Tout", "\\All"),
+      ]),
+    ).toBe(false);
+    // A Gmail-style hierarchy path is not a top-level All Mail.
+    expect(
+      isProtonBridgeLayoutInList([
+        mailbox("INBOX"),
+        mailbox("[Gmail]/All Mail"),
+        mailbox("Folders"),
+        mailbox("Labels"),
+      ]),
+    ).toBe(false);
   });
 
   it("converts between label paths and names", () => {

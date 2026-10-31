@@ -102,10 +102,11 @@ export async function fetchRecentMessages(
     envelope: true,
     flags: true,
     bodyStructure: true,
+    headers: ["references"],
   })) {
     const parsed = await convertImapMessage(
       msg,
-      undefined,
+      msg.headers?.length ? parseReferencesHeader(msg.headers) : undefined,
       mailbox.path,
       mailbox.specialUse,
     );
@@ -146,11 +147,12 @@ export async function fetchMessagesByUids(
         envelope: true,
         flags: true,
         bodyStructure: true,
+        headers: ["references"],
       });
       if (msg) {
         const parsed = await convertImapMessage(
           msg,
-          undefined,
+          msg.headers?.length ? parseReferencesHeader(msg.headers) : undefined,
           client.mailbox?.path,
           client.mailbox?.specialUse,
         );
@@ -375,6 +377,16 @@ function formatAddress(
   if (!address) return name || "";
   if (name) return `${name} <${address}>`;
   return address;
+}
+
+// RFC 5322 References is a foldable list of Message-IDs; unfold and collapse
+// whitespace so buildThreadId recovers the same root as the body path.
+function parseReferencesHeader(raw: Buffer): { references: string } {
+  const unfolded = raw.toString("utf8").replace(/\r\n[ \t]+/g, " ");
+  const values = [...unfolded.matchAll(/^references:(.*)$/gim)].map((m) =>
+    m[1].trim(),
+  );
+  return { references: values.join(" ").replace(/\s+/g, " ").trim() };
 }
 
 /**

@@ -50,7 +50,8 @@ import {
   findSentFolder,
   findTrashFolder,
   getOrCreateFolder,
-  hasLabelNamespace,
+  isProtonBridgeLayout,
+  isProtonBridgeLayoutInList,
   labelNameFromPath,
   labelPathFromName,
   listFolders,
@@ -63,7 +64,6 @@ import { saveDraft } from "@/utils/imap/draft";
 import { sendSmtpEmail } from "@/utils/imap/mail";
 import {
   buildThreadId,
-  getAllThreadMessageIds,
   parseFallbackThreadId,
   parseThreadRootMessageId,
 } from "@/utils/imap/thread";
@@ -322,7 +322,7 @@ export class ImapProvider implements EmailProvider {
 
   async getThreadMessages(
     threadId: string,
-    options?: { includeTrashAndJunk?: boolean },
+    options?: { includeTrashAndJunk?: boolean; forMutation?: boolean },
   ): Promise<ParsedMessage[]> {
     const messages = await this.withConnection((client) =>
       fetchThreadMessages(client, threadId, options),
@@ -500,7 +500,7 @@ export class ImapProvider implements EmailProvider {
     includeHidden?: boolean;
   }): Promise<EmailLabel[]> {
     return this.withConnection(async (client) => {
-      if (await hasLabelNamespace(client)) {
+      if (await isProtonBridgeLayout(client)) {
         const paths = await listLabelMailboxes(client);
         return paths.map((path) => ({
           id: path,
@@ -519,7 +519,7 @@ export class ImapProvider implements EmailProvider {
 
   async getLabelByName(name: string): Promise<EmailLabel | null> {
     return this.withConnection(async (client) => {
-      if (await hasLabelNamespace(client)) {
+      if (await isProtonBridgeLayout(client)) {
         const path = labelPathFromName(name);
         const paths = await listLabelMailboxes(client);
         const found = paths.find(
@@ -552,13 +552,17 @@ export class ImapProvider implements EmailProvider {
 
   async createLabel(name: string, _description?: string): Promise<EmailLabel> {
     return this.withConnection(async (client) => {
-      if (await hasLabelNamespace(client)) {
+      if (await isProtonBridgeLayout(client)) {
         const path = labelPathFromName(name);
         const existing = await listLabelMailboxes(client);
-        if (!existing.some((p) => p.toLowerCase() === path.toLowerCase())) {
+        const canonical = existing.find(
+          (p) => p.toLowerCase() === path.toLowerCase(),
+        );
+        if (!canonical) {
           await client.mailboxCreate(path);
         }
-        return { id: path, name: labelNameFromPath(path), type: "user" };
+        const id = canonical ?? path;
+        return { id, name: labelNameFromPath(id), type: "user" };
       }
       await client.mailboxCreate(name);
       return {
@@ -571,7 +575,7 @@ export class ImapProvider implements EmailProvider {
 
   async deleteLabel(labelId: string): Promise<void> {
     return this.withConnection(async (client) => {
-      if (await hasLabelNamespace(client)) {
+      if (await isProtonBridgeLayout(client)) {
         if (!labelId.startsWith("Labels/"))
           throw new SafeError(
             `Only Labels/* mailboxes can be deleted as labels (${labelId})`,
@@ -591,7 +595,7 @@ export class ImapProvider implements EmailProvider {
   }): Promise<{ usedFallback?: boolean; actualLabelId?: string }> {
     return this.withConnection(async (client) => {
       const { folder, uid } = parseImapMessageId(options.messageId);
-      if (await hasLabelNamespace(client)) {
+      if (await isProtonBridgeLayout(client)) {
         const target =
           options.labelId.startsWith("Labels/") && options.labelId !== "Labels/"
             ? options.labelId
@@ -615,7 +619,7 @@ export class ImapProvider implements EmailProvider {
 
   async removeThreadLabel(threadId: string, labelId: string): Promise<void> {
     return this.withConnection(async (client) => {
-      if (!(await hasLabelNamespace(client))) {
+      if (!(await isProtonBridgeLayout(client))) {
         // No label namespace: a message lives in one folder, so there is
         // nothing to detach without moving it.
         this.logger.warn("removeThreadLabel is a no-op for IMAP", {
@@ -632,7 +636,7 @@ export class ImapProvider implements EmailProvider {
     labelIds: string[],
   ): Promise<void> {
     return this.withConnection(async (client) => {
-      if (!(await hasLabelNamespace(client))) {
+      if (!(await isProtonBridgeLayout(client))) {
         this.logger.warn("removeThreadLabels is a no-op for IMAP", {
           threadId,
         });
@@ -649,7 +653,7 @@ export class ImapProvider implements EmailProvider {
   async archiveThread(threadId: string, _ownerEmail: string): Promise<void> {
     let messages: ParsedMessage[];
     try {
-      messages = await this.getThreadMessages(threadId);
+      messages = await this.getThreadMessages(threadId, { forMutation: true });
     } catch (error) {
       // Gmail treats archiving a vanished thread as success (404 → no-op);
       // IMAP already throws ImapThreadNotFoundError from getThreadMessages,
@@ -690,7 +694,9 @@ export class ImapProvider implements EmailProvider {
   ): Promise<void> {
     // For IMAP, archive with label = move to the label folder (or archive)
     if (_labelId) {
-      const messages = await this.getThreadMessages(threadId);
+      const messages = await this.getThreadMessages(threadId, {
+        forMutation: true,
+      });
       return this.withConnection(async (client) => {
         for (const msg of messages) {
           const { folder, uid } = parseImapMessageId(msg.id);
@@ -720,7 +726,7 @@ export class ImapProvider implements EmailProvider {
   ): Promise<void> {
     let messages: ParsedMessage[];
     try {
-      messages = await this.getThreadMessages(threadId);
+      messages = await this.getThreadMessages(threadId, { forMutation: true });
     } catch (error) {
       // Same no-op-on-missing rule as archiveThread: Gmail trash returns 200
       // for an already-deleted thread, so a raced automation must not fail.
@@ -755,7 +761,9 @@ export class ImapProvider implements EmailProvider {
   }
 
   async markReadThread(threadId: string, read: boolean): Promise<void> {
-    const messages = await this.getThreadMessages(threadId);
+    const messages = await this.getThreadMessages(threadId, {
+      forMutation: true,
+    });
     return this.withConnection(async (client) => {
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
@@ -779,7 +787,9 @@ export class ImapProvider implements EmailProvider {
 
   async markSpam(threadId: string): Promise<void> {
     // Move to Junk/Spam folder
-    const messages = await this.getThreadMessages(threadId);
+    const messages = await this.getThreadMessages(threadId, {
+      forMutation: true,
+    });
     return this.withConnection(async (client) => {
       const junkFolder = await findJunkFolder(client);
       const targetFolder = junkFolder || "Junk";
@@ -801,7 +811,9 @@ export class ImapProvider implements EmailProvider {
     _ownerEmail: string,
     folderName: string,
   ): Promise<void> {
-    const messages = await this.getThreadMessages(threadId);
+    const messages = await this.getThreadMessages(threadId, {
+      forMutation: true,
+    });
     return this.withConnection(async (client) => {
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
@@ -1451,6 +1463,7 @@ ${messageContent}
   async markNotSpam(threadId: string): Promise<void> {
     const messages = await this.getThreadMessages(threadId, {
       includeTrashAndJunk: true,
+      forMutation: true,
     });
     return this.withConnection(async (client) => {
       for (const msg of messages) {
@@ -1463,7 +1476,9 @@ ${messageContent}
   }
 
   async unarchiveThread(threadId: string): Promise<void> {
-    const messages = await this.getThreadMessages(threadId);
+    const messages = await this.getThreadMessages(threadId, {
+      forMutation: true,
+    });
     return this.withConnection(async (client) => {
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
@@ -1479,6 +1494,7 @@ ${messageContent}
     // which now scans the same folders as every other thread operation.
     const messages = await this.getThreadMessages(threadId, {
       includeTrashAndJunk: true,
+      forMutation: true,
     });
     return this.withConnection(async (client) => {
       for (const msg of messages) {
@@ -1693,6 +1709,10 @@ ${messageContent}
       for await (const chunk of downloaded.content) {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       }
+      if (chunks.length === 0)
+        throw new SafeError(
+          `Attachment part ${attachmentId} not found on message ${messageId}`,
+        );
       return Buffer.concat(chunks);
     });
   }
@@ -1800,23 +1820,34 @@ ${messageContent}
 
 /**
  * Mailboxes a whole-account IMAP search should cover.
- * When an all-mail mailbox exists (flagged \All, or Bridge's unflagged
- * "All Mail" / "[Gmail]/All Mail"), search only there — plus Trash/Junk
- * when the caller asks for them — and never fan out. Otherwise fan out
- * over every selectable real mailbox, skipping views whose messages also
- * live in a real folder (Labels/*, Starred/\Flagged, All Mail) so the same
- * message is not returned twice. Trash and Junk are excluded by default
- * (listing/search scope) but included for thread resolution, so
- * untrash/markNotSpam can find threads living only there.
+ * A flagged `\All` mailbox (Gmail) is canonical: reads and mutations both
+ * use it. Bridge's unflagged "All Mail" is a view, so it serves read-only
+ * lookups only, and only on the full Bridge layout (top-level `Folders`,
+ * `Labels`, `All Mail`, no `\All` anywhere) — a stray user folder named
+ * `All Mail` never narrows a search. Otherwise fan out over every
+ * selectable real mailbox, skipping views whose messages also live in a
+ * real folder (Labels mailboxes, Starred/Flagged, All Mail) so the same
+ * message is not returned twice. Mutation callers (archive, trash,
+ * restore, move, mark, star) pass `forMutation: true`: on Bridge layouts
+ * the members then resolve in their real folders, so each member's own
+ * mailbox is opened exactly once and views are never mutated. Message ids
+ * in thread results then point at real folders. Trash and Junk are
+ * excluded by default (listing/search scope) but included for thread
+ * resolution, so untrash/markNotSpam can find threads living only there.
  */
 async function resolveSearchFolders(
   client: ImapFlow,
-  options?: { includeTrashAndJunk?: boolean },
+  options?: { includeTrashAndJunk?: boolean; forMutation?: boolean },
 ): Promise<string[]> {
   const mailboxes = await client.list();
 
   const allMail = findAllMailInList(mailboxes);
-  if (allMail) {
+  const flaggedAll = mailboxes.some((mb) => mb.specialUse === "\\All");
+  const useAllMail =
+    allMail &&
+    (flaggedAll ||
+      (!options?.forMutation && isProtonBridgeLayoutInList(mailboxes)));
+  if (useAllMail) {
     if (!options?.includeTrashAndJunk) return [allMail];
     const trashAndJunk = mailboxes
       .filter(
@@ -1843,7 +1874,7 @@ async function resolveSearchFolders(
 }
 
 // Proton view mailboxes whose messages also live in a real folder. Fanning
-// out over them returns every labeled/starred message twice.
+// out over them returns every labeled or starred message twice.
 function isViewMailbox(path: string): boolean {
   if (path === "Labels" || path.startsWith("Labels/")) return true;
   if (path === "Starred") return true;
@@ -1875,17 +1906,14 @@ function groupMessageIdsByFolder(
  * Message-ID, References and In-Reply-To headers for the root directly —
  * no newest-N scan. Members key by full id (folder+UID): UIDs repeat
  * across folders. HEADER SEARCH is substring-based, so candidates are
- * re-verified by recomputing the thread id exactly. One hop of expansion
- * follows members that reference a found member but not the root (a reply
- * quoting a sibling quotes the sibling's id, not the root's). Trash and
- * Junk are scanned only when the caller asks for them
- * (untrash/markNotSpam); every other thread operation must not act on a
- * deleted reply.
+ * re-verified by recomputing the thread id exactly. Trash and Junk are
+ * scanned only when the caller asks for them (untrash/markNotSpam); every
+ * other thread operation must not act on a deleted reply.
  */
 async function fetchThreadMessages(
   client: ImapFlow,
   threadId: string,
-  options?: { includeTrashAndJunk?: boolean },
+  options?: { includeTrashAndJunk?: boolean; forMutation?: boolean },
 ): Promise<ParsedMessage[]> {
   // Header-less messages keep their folder-qualified listing key
   // (`uid@base64url(folder)`) in the thread id, so the owning message is
@@ -1914,39 +1942,6 @@ async function fetchThreadMessages(
     });
     const verified = await filterThreadCandidates(client, candidates, threadId);
     for (const message of verified) byUid.set(message.id, message);
-  }
-
-  // One hop: a message that references a member but not the root (a reply
-  // quoting a sibling's id) is still part of the thread.
-  const memberIds = new Set<string>();
-  for (const message of byUid.values()) {
-    for (const id of getAllThreadMessageIds(
-      message.headers.references,
-      message.headers["in-reply-to"],
-      message.headers["message-id"],
-    )) {
-      memberIds.add(id.toLowerCase());
-    }
-  }
-  memberIds.delete(root.toLowerCase());
-
-  for (const folder of folders) {
-    await client.mailboxOpen(folder, { readOnly: true });
-    for (const messageId of memberIds) {
-      const candidates = await searchImapMessages(client, {
-        or: [
-          { header: { "Message-ID": messageId } },
-          { header: { References: messageId } },
-          { header: { "In-Reply-To": messageId } },
-        ],
-      });
-      const verified = await filterThreadCandidates(
-        client,
-        candidates,
-        threadId,
-      );
-      for (const message of verified) byUid.set(message.id, message);
-    }
   }
 
   return [...byUid.values()];
@@ -1983,11 +1978,18 @@ async function removeProtonThreadLabel(
   const labelFolder = labelId.startsWith("Labels/")
     ? labelId
     : labelPathFromName(labelId);
-  const messages = await fetchThreadMessages(client, threadId);
+  const present = (await listLabelMailboxes(client)).some(
+    (path) => path.toLowerCase() === labelFolder.toLowerCase(),
+  );
+  if (!present) return;
+  // Mutating path: resolve members in their real folders, never in a view.
+  const messages = await fetchThreadMessages(client, threadId, {
+    forMutation: true,
+  });
   const wanted = new Set(
     messages.flatMap((message) =>
       message.headers["message-id"]
-        ? [message.headers["message-id"].replace(/^<|>$/g, "")]
+        ? [message.headers["message-id"].replace(/^<|>$/g, "").toLowerCase()]
         : [],
     ),
   );
@@ -1997,8 +1999,18 @@ async function removeProtonThreadLabel(
     const uids = await searchImapMessages(client, {
       header: { "Message-ID": messageId },
     });
-    for (const uid of uids) {
-      await client.messageDelete(String(uid), { uid: true });
+    const hits = await fetchMessagesByUids(client, uids);
+    for (const hit of hits) {
+      // gluon HEADER search is a substring match: `<xr@x>` also matches
+      // `<r@x>`, so only expunge the exact Message-ID.
+      if (
+        hit.headers["message-id"]?.replace(/^<|>$/g, "").toLowerCase() ===
+        messageId
+      ) {
+        await client.messageDelete(String(parseImapMessageId(hit.id).uid), {
+          uid: true,
+        });
+      }
     }
   }
 }

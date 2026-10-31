@@ -87,6 +87,12 @@ describe("buildThreadId with a fallback key", () => {
       `fallback:${inboxOne}`,
     );
   });
+
+  it("requires a fallback key for header-less messages", () => {
+    expect(() => buildThreadId(undefined, undefined, undefined)).toThrow(
+      /fallback key/,
+    );
+  });
 });
 
 describe("parseFallbackThreadId", () => {
@@ -175,6 +181,13 @@ describe("buildThreadId", () => {
   it("parseThreadRootMessageId rejects malformed ids", () => {
     expect(() => parseThreadRootMessageId("t.!!!")).toThrow();
     expect(parseThreadRootMessageId("nope")).toBeNull();
+  });
+
+  it("parseThreadRootMessageId rejects roots that cannot be a Message-ID", () => {
+    const shortRoot = `t.${Buffer.from("a", "utf8").toString("base64url")}`;
+    expect(() => parseThreadRootMessageId(shortRoot)).toThrow(/implausible/);
+    const noAt = `t.${Buffer.from("no-at-sign-here", "utf8").toString("base64url")}`;
+    expect(() => parseThreadRootMessageId(noAt)).toThrow(/implausible/);
   });
 });
 
