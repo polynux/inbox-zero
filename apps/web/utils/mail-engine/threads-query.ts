@@ -58,12 +58,16 @@ export function threadsQueryToPredicate(query: ThreadsQuery): MailPredicate {
     query.type === "inbox" ||
     query.type === "sent" ||
     query.type === "draft" ||
+    query.type === "drafts" ||
     query.type === "trash" ||
     query.type === "spam"
   ) {
     clauses.push({
       kind: "mailbox",
-      mailbox: query.type === "draft" ? "drafts" : query.type,
+      mailbox:
+        query.type === "draft" || query.type === "drafts"
+          ? "drafts"
+          : query.type,
     });
   } else if (query.type === "archive") {
     clauses.push({ kind: "mailbox", mailbox: "archive" });

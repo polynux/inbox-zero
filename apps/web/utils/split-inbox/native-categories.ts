@@ -26,6 +26,7 @@ const MAILBOX_TYPES = new Set([
   "inbox",
   "sent",
   "draft",
+  "drafts",
   "trash",
   "spam",
   "starred",

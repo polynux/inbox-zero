@@ -2,6 +2,13 @@ import { describe, expect, it } from "vitest";
 import { threadsQueryToPredicate } from "./threads-query";
 
 describe("threadsQueryToPredicate", () => {
+  it("maps the drafts plural alias onto the drafts mailbox", () => {
+    expect(threadsQueryToPredicate({ type: "drafts" })).toEqual({
+      kind: "mailbox",
+      mailbox: "drafts",
+    });
+  });
+
   it("maps unread inbox queries onto a same-message all-predicate", () => {
     expect(threadsQueryToPredicate({ type: "unread" })).toEqual({
       kind: "all",
