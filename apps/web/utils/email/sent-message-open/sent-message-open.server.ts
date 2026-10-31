@@ -2,6 +2,7 @@ import "server-only";
 import { createHmac, randomBytes } from "node:crypto";
 import prisma from "@/utils/prisma";
 import { sendComposeDraft } from "@/utils/email/compose-draft";
+import { DraftNotFoundError } from "@/utils/error";
 import { env } from "@/env";
 import { toAbsoluteUrl } from "@/utils/branding";
 import { secureCompareBuffers } from "@/utils/crypto-compare";
@@ -167,13 +168,27 @@ export async function sendHtmlEmailWithOpenTracking({
     email,
     logger,
   });
-  const result = email.providerDraftId
-    ? await sendComposeDraft({
+  let result: { messageId: string; threadId: string };
+  if (!email.providerDraftId) {
+    result = await emailProvider.sendEmailWithHtml(prepared.email);
+  } else {
+    try {
+      result = await sendComposeDraft({
         draftId: email.providerDraftId,
         provider: emailProvider,
         email: prepared.email,
-      })
-    : await emailProvider.sendEmailWithHtml(prepared.email);
+      });
+    } catch (error) {
+      // The mailbox draft may have been sent, deleted, or replaced elsewhere
+      // (or never confirmed); the composed content is complete on its own,
+      // so send it as a fresh message instead of failing the send.
+      if (!(error instanceof DraftNotFoundError)) throw error;
+      logger.warn("Mailbox draft missing at send; sending without it", {
+        error,
+      });
+      result = await emailProvider.sendEmailWithHtml(prepared.email);
+    }
+  }
   await associateSentMessageOpen({
     token: prepared.token,
     messageId: result.messageId,

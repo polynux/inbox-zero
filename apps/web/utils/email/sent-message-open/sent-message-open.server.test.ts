@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { DraftNotFoundError } from "@/utils/error";
 import prisma from "@/utils/__mocks__/prisma";
 import { createTestLogger } from "@/__tests__/helpers";
 import { sendHtmlEmailWithOpenTracking } from "./sent-message-open.server";
@@ -306,6 +307,34 @@ describe("sendHtmlEmailWithOpenTracking", () => {
     );
     expect(sendDraft).toHaveBeenCalledWith("draft-1");
     expect(sendEmailWithHtml).not.toHaveBeenCalled();
+    expect(prisma.sentMessageOpen.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { messageId: "sent-1", threadId: "thread-1" },
+      }),
+    );
+  });
+  it("sends as a fresh message when the mailbox draft is gone", async () => {
+    const updateDraft = vi
+      .fn()
+      .mockRejectedValue(new DraftNotFoundError("Could not find this draft."));
+    const sendDraft = vi.fn();
+    const sendEmailWithHtml = vi.fn().mockResolvedValue({
+      messageId: "sent-1",
+      threadId: "thread-1",
+    });
+    await sendHtmlEmailWithOpenTracking({
+      emailAccountId: "account-1",
+      email: {
+        to: "recipient@example.com",
+        subject: "Example",
+        messageHtml: "<p>Example</p>",
+        providerDraftId: "draft-1",
+      },
+      emailProvider: { updateDraft, sendDraft, sendEmailWithHtml } as never,
+      logger: createTestLogger(),
+    });
+    expect(sendDraft).not.toHaveBeenCalled();
+    expect(sendEmailWithHtml).toHaveBeenCalledOnce();
     expect(prisma.sentMessageOpen.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: { messageId: "sent-1", threadId: "thread-1" },
