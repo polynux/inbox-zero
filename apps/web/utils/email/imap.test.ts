@@ -369,7 +369,7 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     ]);
   });
 
-  it("searches Bridge's unflagged All Mail by name instead of fanning out", async () => {
+  it("fans out over real folders on Bridge, never returning All Mail view ids", async () => {
     const fake = createFakeClient([
       {
         path: "INBOX",
@@ -403,10 +403,12 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       query: "invoice",
     });
 
-    expect(fake.opened).toEqual(["All Mail"]);
+    expect(fake.opened).not.toContain("All Mail");
+    expect(fake.opened).not.toContain("Labels/Work");
+    expect(fake.opened).not.toContain("Starred");
     expect(result.messages.map((m) => m.id)).toEqual([
-      qualifiedId("All Mail", 41),
-      qualifiedId("All Mail", 40),
+      qualifiedId("INBOX", 2),
+      qualifiedId("INBOX", 1),
     ]);
   });
 
