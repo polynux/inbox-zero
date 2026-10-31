@@ -134,6 +134,7 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       };
       opened.push(path);
       return {
+        path,
         exists: mailbox.messages.length,
         specialUse: mailbox.specialUse,
       };
@@ -1413,5 +1414,408 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
     );
 
     expect(moved).toEqual([{ uid: 1, to: "Folders/Archive", from: "INBOX" }]);
+  });
+});
+
+describe("ImapProvider thread id agreement across listing, getMessage and thread ops", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  const root = "<r@x>";
+  const rootThreadId = buildThreadId(undefined, undefined, root);
+
+  // Thread: R (root) <- M1 (replies to R) <- M2 (replies to M1, cites R M1).
+  function threadMailboxes() {
+    return [
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", "owner@example.com", {
+            messageId: root,
+          }),
+          message(2, "2026-01-02", "owner@example.com", "alice@x", {
+            messageId: "<m1@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+          message(3, "2026-01-03", "alice@x", "owner@example.com", {
+            messageId: "<m2@x>",
+            inReplyTo: "<m1@x>",
+            references: `${root} <m1@x>`,
+          }),
+        ],
+      },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+      { path: "Sent", specialUse: "\\Sent", messages: [] },
+    ];
+  }
+
+  function bridgeThreadMailboxes() {
+    const plain = threadMailboxes();
+    return [
+      ...plain,
+      { path: "Sent", specialUse: "\\Sent", messages: [] },
+      { path: "Drafts", specialUse: "\\Drafts", messages: [] },
+      { path: "Spam", specialUse: "\\Junk", messages: [] },
+      { path: "Trash", specialUse: "\\Trash", messages: [] },
+      {
+        path: "All Mail",
+        messages: plain[0].messages.map((m, index) => ({
+          ...m,
+          uid: 11 + index,
+        })),
+      },
+      { path: "Folders", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels/Work", messages: [] },
+      { path: "Starred", specialUse: "\\Flagged", messages: [] },
+    ];
+  }
+
+  it("gives a depth-2 reply the same thread id in the listing and in getMessage", async () => {
+    const fake = createFakeClient(threadMailboxes());
+    connection.client = fake.client;
+
+    const threads = await new ImapProvider(config).getThreads();
+    const listedM2 = threads
+      .flatMap((thread) => thread.messages)
+      .find((m) => m.subject === "message 3")?.threadId;
+    const fullM2 = (
+      await new ImapProvider(config).getMessage(qualifiedId("INBOX", 3))
+    ).threadId;
+
+    expect(listedM2).toBe(fullM2);
+    expect(fullM2).toBe(rootThreadId);
+  });
+
+  it("keeps one thread for R-M1-M2 in the listing", async () => {
+    const fake = createFakeClient(threadMailboxes());
+    connection.client = fake.client;
+
+    const threads = await new ImapProvider(config).getThreads();
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0].messages).toHaveLength(3);
+  });
+
+  it("resolves the whole thread from any member id", async () => {
+    const fake = createFakeClient(threadMailboxes());
+    connection.client = fake.client;
+    const listedM2 = buildThreadId(`${root} <m1@x>`, "<m1@x>", "<m2@x>");
+
+    const fromM2 = await new ImapProvider(config).getThreadMessages(listedM2);
+    const fromRoot = await new ImapProvider(config).getThreadMessages(
+      rootThreadId,
+    );
+
+    expect(fromM2.map((m) => m.subject).sort()).toEqual([
+      "message 1",
+      "message 2",
+      "message 3",
+    ]);
+    expect(fromRoot.map((m) => m.subject).sort()).toEqual([
+      "message 1",
+      "message 2",
+      "message 3",
+    ]);
+  });
+
+  it("archiveThread on the root moves every member out of INBOX", async () => {
+    const fake = createFakeClient(threadMailboxes());
+    connection.client = fake.client;
+
+    await new ImapProvider(config).archiveThread(
+      rootThreadId,
+      "owner@example.com",
+    );
+
+    expect(mailboxesOf(fake).INBOX).toEqual([]);
+    expect(mailboxesOf(fake).Archive).toHaveLength(3);
+  });
+
+  it("archiveThread on a Bridge layout moves real-folder copies, never All Mail views", async () => {
+    const fake = createFakeClient(bridgeThreadMailboxes());
+    connection.client = fake.client;
+
+    await new ImapProvider(config).archiveThread(
+      rootThreadId,
+      "owner@example.com",
+    );
+
+    const moves = (
+      fake.client.messageMove as unknown as { mock: { calls: unknown[][] } }
+    ).mock.calls;
+    expect(moves.length).toBeGreaterThan(0);
+    for (const [, to] of moves) expect(to).toBe("Archive");
+    expect(fake.opened).not.toContain("All Mail");
+    expect(fake.opened).not.toContain("Labels/Work");
+    expect(fake.opened).not.toContain("Starred");
+    expect(mailboxesOf(fake).INBOX).toEqual([]);
+    expect(mailboxesOf(fake)["All Mail"]).toHaveLength(3);
+  });
+
+  it("a non-Proton server with a user folder named All Mail still fans out to INBOX", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", "owner@example.com", {
+            messageId: root,
+          }),
+          message(2, "2026-01-02", "owner@example.com", "alice@x", {
+            messageId: "<m1@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+        ],
+      },
+      { path: "All Mail", messages: [] },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+    ]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).getThreadMessages(rootThreadId),
+    ).resolves.toHaveLength(2);
+  });
+
+  it("a lookalike header that merely contains the root is not in the thread", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, {
+            messageId: root,
+          }),
+          message(2, "2026-01-02", "bob@x", undefined, {
+            messageId: "<xr@x>",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const messages = await new ImapProvider(config).getThreadMessages(
+      rootThreadId,
+    );
+
+    expect(messages.map((m) => m.subject)).toEqual(["message 1"]);
+  });
+
+  it("rejects a short crafted root before any SEARCH", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    connection.client = fake.client;
+    const shortId = `t.${Buffer.from("a", "utf8").toString("base64url")}`;
+
+    await expect(
+      new ImapProvider(config).getThreadMessages(shortId),
+    ).rejects.toThrow(/implausible/);
+    expect(fake.client.search).not.toHaveBeenCalled();
+  });
+
+  it("resolves a thread with one SEARCH per folder and no follow-up hops", async () => {
+    const plain = threadMailboxes();
+    const fake = createFakeClient([
+      ...plain,
+      { path: "Sent", specialUse: "\\Sent", messages: [] },
+      { path: "Drafts", specialUse: "\\Drafts", messages: [] },
+      { path: "Spam", specialUse: "\\Junk", messages: [] },
+      { path: "Trash", specialUse: "\\Trash", messages: [] },
+      {
+        path: "All Mail",
+        messages: plain[0].messages.map((m, index) => ({
+          ...m,
+          uid: 11 + index,
+        })),
+      },
+      { path: "Folders", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels/Work", messages: [] },
+      { path: "Starred", specialUse: "\\Flagged", messages: [] },
+    ]);
+    connection.client = fake.client;
+
+    const messages = await new ImapProvider(config).getThreadMessages(
+      rootThreadId,
+    );
+
+    expect(messages).toHaveLength(3);
+    expect(fake.opened).toEqual(["All Mail"]);
+    const headerSearches = (
+      fake.client.search as unknown as { mock: { calls: unknown[][] } }
+    ).mock.calls.filter((call) =>
+      ["header", "or"].some(
+        (key) => key in (call[0] as Record<string, unknown>),
+      ),
+    );
+    expect(headerSearches).toHaveLength(1);
+  });
+});
+
+describe("ImapProvider Proton label edge cases", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  const root = "<r@x>";
+
+  function bridgeWithLabels(
+    labelMailboxes: Array<{ path: string; messages: FakeMessage[] }>,
+  ) {
+    return [
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, { messageId: root }),
+          message(2, "2026-01-02", "owner@example.com", undefined, {
+            messageId: "<m1@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+          message(3, "2026-01-03", "alice@x", undefined, {
+            messageId: "<m2@x>",
+            inReplyTo: "<m1@x>",
+            references: `${root} <m1@x>`,
+          }),
+        ],
+      },
+      { path: "Sent", specialUse: "\\Sent", messages: [] },
+      { path: "Drafts", specialUse: "\\Drafts", messages: [] },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+      { path: "Spam", specialUse: "\\Junk", messages: [] },
+      { path: "Trash", specialUse: "\\Trash", messages: [] },
+      { path: "All Mail", messages: [] },
+      { path: "Folders", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      ...labelMailboxes,
+      { path: "Starred", specialUse: "\\Flagged", messages: [] },
+    ];
+  }
+
+  it("removing a label that was never created is a no-op", async () => {
+    const fake = createFakeClient(bridgeWithLabels([]));
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).removeThreadLabel(
+        buildThreadId(undefined, undefined, root),
+        "Labels/Ghost",
+      ),
+    ).resolves.toBeUndefined();
+    expect(fake.opened).not.toContain("Labels/Ghost");
+  });
+
+  it("removal matches Message-ID exactly, not by substring", async () => {
+    const fake = createFakeClient(
+      bridgeWithLabels([
+        {
+          path: "Labels/Work",
+          messages: [
+            message(21, "2026-01-01", "alice@x", undefined, {
+              messageId: root,
+            }),
+            message(22, "2026-01-02", "bob@x", undefined, {
+              messageId: "<xr@x>",
+            }),
+          ],
+        },
+      ]),
+    );
+    const deleted: Array<{ uid: number; folder: string }> = [];
+    fake.client.messageDelete = vi.fn(async (uid: string) => {
+      deleted.push({ uid: Number(uid), folder: fake.opened.at(-1) || "" });
+      const list = mailboxesOf(fake)["Labels/Work"];
+      const index = list.findIndex((m) => m.uid === Number(uid));
+      if (index >= 0) list.splice(index, 1);
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).removeThreadLabel(
+      buildThreadId(undefined, undefined, root),
+      "Labels/Work",
+    );
+
+    expect(deleted).toEqual([{ uid: 21, folder: "Labels/Work" }]);
+    expect(mailboxesOf(fake)["Labels/Work"].map((m) => m.uid)).toEqual([22]);
+    expect(mailboxesOf(fake).INBOX).toHaveLength(3);
+  });
+
+  it("a plain folder named Labels keeps MOVE semantics", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, { messageId: root }),
+        ],
+      },
+      { path: "Labels", messages: [] },
+      { path: "Projects", messages: [] },
+    ]);
+    const moved: Array<{ uid: number; to: string }> = [];
+    fake.client.messageMove = vi.fn(async (uid: string, to: string) => {
+      moved.push({ uid: Number(uid), to });
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).labelMessage({
+      messageId: qualifiedId("INBOX", 1),
+      labelId: "Projects",
+      labelName: null,
+    });
+
+    expect(moved).toEqual([{ uid: 1, to: "Projects" }]);
+  });
+
+  it("createLabel with different case returns the existing mailbox id", async () => {
+    const fake = createFakeClient(
+      bridgeWithLabels([{ path: "Labels/Work", messages: [] }]),
+    );
+    fake.client.mailboxCreate = vi.fn(async () => undefined);
+    connection.client = fake.client;
+
+    await expect(new ImapProvider(config).createLabel("work")).resolves.toEqual(
+      {
+        id: "Labels/Work",
+        name: "Work",
+        type: "user",
+      },
+    );
+    expect(fake.client.mailboxCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("ImapProvider attachment edge cases", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("an absent part id throws instead of returning an empty attachment", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    fake.client.download = vi.fn(async () => ({
+      content: (async function* () {})(),
+    }));
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).getAttachment(qualifiedId("INBOX", 1), "9"),
+    ).rejects.toThrow(/not found/i);
+    await expect(
+      new ImapProvider(config)
+        .getAttachmentStream(qualifiedId("INBOX", 1), "9")
+        .then(
+          async (stream) => {
+            for await (const _chunk of stream as unknown as AsyncIterable<Uint8Array>) {
+              // drain
+            }
+            return "resolved";
+          },
+          (error: Error) => error.message,
+        ),
+    ).resolves.toMatch(/not found/i);
   });
 });
