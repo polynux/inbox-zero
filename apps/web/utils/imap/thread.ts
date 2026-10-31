@@ -71,6 +71,13 @@ export function parseThreadRootMessageId(threadId: string): string | null {
 // tokens when they are not the message's own id.
 const PROTON_INTERNALID_DOMAIN = "protonmail.internalid";
 
+export function isProtonInternalId(value: string): boolean {
+  return value
+    .replace(/^<|>$/g, "")
+    .trim()
+    .toLowerCase()
+    .endsWith(`@${PROTON_INTERNALID_DOMAIN}`);
+}
 function withoutProtonInternalIds(ids: string[], ownId?: string): string[] {
   const own = ownId?.replace(/^<|>$/g, "").trim().toLowerCase();
   return ids.filter((id) => {

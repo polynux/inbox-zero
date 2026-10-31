@@ -86,9 +86,11 @@ import { sendSmtpEmail } from "@/utils/imap/mail";
 import { toMailerAttachments } from "@/utils/types/mail";
 import {
   buildThreadId,
+  isProtonInternalId,
   parseFallbackThreadId,
   parseThreadRootMessageId,
 } from "@/utils/imap/thread";
+import { buildThreadingHeaders } from "@/utils/email/threading";
 import { extractEmailAddress, splitRecipientList } from "@/utils/email";
 import { createScopedLogger } from "@/utils/logger";
 import { escapeHtml, textToHtmlParagraphs } from "@/utils/string";
@@ -1344,6 +1346,27 @@ ${messageContent}
     forwardedMessageId?: string;
   }): Promise<{ id: string }> {
     return this.withConnection(async (client) => {
+      // Thread a reply on the parent's headers: its Message-ID becomes
+      // In-Reply-To and extends References, like replyToEmail does when
+      // sending directly. Proton-internal ids never anchor a thread.
+      let inReplyTo = params.forwardedMessageId;
+      let references: string | undefined;
+      if (params.replyToMessageId) {
+        const parent = await this.getMessage(params.replyToMessageId).catch(
+          () => null,
+        );
+        const parentId = parent?.headers["message-id"];
+        if (parentId && !isProtonInternalId(parentId)) {
+          const threading = buildThreadingHeaders({
+            headerMessageId: parentId,
+            references: parent?.headers.references,
+          });
+          inReplyTo = threading.inReplyTo;
+          references = threading.references || undefined;
+        } else {
+          inReplyTo = params.replyToMessageId;
+        }
+      }
       const id = await saveDraft(client, {
         from: params.from || this.config.email,
         to: params.to,
@@ -1351,7 +1374,8 @@ ${messageContent}
         bcc: params.bcc,
         subject: params.subject,
         html: params.messageHtml,
-        inReplyTo: params.replyToMessageId ?? params.forwardedMessageId,
+        inReplyTo,
+        references,
       });
       return { id };
     });

@@ -1232,6 +1232,84 @@ describe("ImapProvider stable draft ids", () => {
     );
   });
 
+  it("createDraft as reply threads the sent message with its parent", async () => {
+    const parentMessageId = "<parent-1@example.com>";
+    const parentReferences = "<root@example.com> <parent-1@example.com>";
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(7, "2026-01-01", "alice@example.com", "me@example.com", {
+            messageId: parentMessageId,
+            references: parentReferences,
+            subject: "thread",
+          }),
+        ],
+      },
+      draftsMailbox(),
+    ]);
+    connection.client = fake.client;
+    const sent: Array<Record<string, unknown>> = [];
+    const sendSpy = vi
+      .spyOn(mailModule, "sendSmtpEmail")
+      .mockImplementation(async (_config, options) => {
+        sent.push(options as Record<string, unknown>);
+        return { messageId: "<smtp-sent@example.com>" };
+      });
+    try {
+      const provider = new ImapProvider(config);
+      const parent = await provider.getMessage(qualifiedId("INBOX", 7));
+      const { id } = await provider.createDraft({
+        to: "alice@example.com",
+        subject: "Re: thread",
+        messageHtml: "<p>reply</p>",
+        replyToMessageId: qualifiedId("INBOX", 7),
+      });
+
+      const draft = await provider.getDraft(id);
+      expect(draft?.headers["in-reply-to"]).toBe(parentMessageId);
+      expect(draft?.headers.references).toBe(
+        `${parentReferences} ${parentMessageId}`,
+      );
+      const { threadId } = await provider.sendDraft(id);
+      expect(threadId).toBe(parent.threadId);
+      expect(sent[0]).toMatchObject({
+        inReplyTo: parentMessageId,
+        references: `${parentReferences} ${parentMessageId}`,
+      });
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("createDraft reply ignores a proton-internal parent id", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(7, "2026-01-01", "alice@example.com", "me@example.com", {
+            messageId: "<abc@protonmail.internalid>",
+            subject: "thread",
+          }),
+        ],
+      },
+      draftsMailbox(),
+    ]);
+    connection.client = fake.client;
+    const provider = new ImapProvider(config);
+    const replyTo = qualifiedId("INBOX", 7);
+    const { id } = await provider.createDraft({
+      to: "alice@example.com",
+      subject: "Re: thread",
+      messageHtml: "<p>reply</p>",
+      replyToMessageId: replyTo,
+    });
+
+    const draft = await provider.getDraft(id);
+    expect(draft?.headers["in-reply-to"]).toBe(replyTo);
+    expect(draft?.headers.references).toBeUndefined();
+  });
+
   it("sendDraft sends the latest content via SMTP and removes the draft", async () => {
     const fake = createFakeClient([draftsMailbox()]);
     connection.client = fake.client;
