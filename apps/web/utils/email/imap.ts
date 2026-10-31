@@ -43,6 +43,7 @@ import {
 } from "@/utils/imap/local-mail-sync";
 import type { DraftAttachmentMetadata } from "@/utils/actions/draft-attachments.validation";
 import {
+  findAllMailInList,
   findArchiveFolder,
   findDraftsFolder,
   findJunkFolder,
@@ -1697,10 +1698,13 @@ ${messageContent}
 
 /**
  * Mailboxes a whole-account IMAP search should cover.
- * Proton Bridge exposes every message through its `\All` mailbox, so search
- * that instead of re-reading each folder; otherwise use every selectable
- * mailbox except the drafts special-use folder. Trash and Junk are excluded
- * by default (listing/search scope) but included for thread resolution, so
+ * When an all-mail mailbox exists (flagged \All, or Bridge's unflagged
+ * "All Mail" / "[Gmail]/All Mail"), search only there — plus Trash/Junk
+ * when the caller asks for them — and never fan out. Otherwise fan out
+ * over every selectable real mailbox, skipping views whose messages also
+ * live in a real folder (Labels/*, Starred/\Flagged, All Mail) so the same
+ * message is not returned twice. Trash and Junk are excluded by default
+ * (listing/search scope) but included for thread resolution, so
  * untrash/markNotSpam can find threads living only there.
  */
 async function resolveSearchFolders(
@@ -1709,20 +1713,40 @@ async function resolveSearchFolders(
 ): Promise<string[]> {
   const mailboxes = await client.list();
 
-  const allMail = mailboxes.find((mb) => mb.specialUse === "\\All");
-  if (allMail) return [allMail.path];
+  const allMail = findAllMailInList(mailboxes);
+  if (allMail) {
+    if (!options?.includeTrashAndJunk) return [allMail];
+    const trashAndJunk = mailboxes
+      .filter(
+        (mb) =>
+          (mb.specialUse === "\\Trash" || mb.specialUse === "\\Junk") &&
+          mb.path !== allMail,
+      )
+      .map((mb) => mb.path);
+    return [allMail, ...trashAndJunk];
+  }
 
   const skippedSpecialUse = new Set(
     options?.includeTrashAndJunk
-      ? ["\\Drafts"]
-      : ["\\Trash", "\\Junk", "\\Drafts"],
+      ? ["\\Drafts", "\\Flagged"]
+      : ["\\Trash", "\\Junk", "\\Drafts", "\\Flagged"],
   );
   const paths = mailboxes
     .filter((mb) => mb.listed && !mb.flags.has("\\Noselect"))
     .filter((mb) => !mb.specialUse || !skippedSpecialUse.has(mb.specialUse))
+    .filter((mb) => !isViewMailbox(mb.path))
     .map((mb) => mb.path);
 
   return paths.length > 0 ? paths : ["INBOX"];
+}
+
+// Proton view mailboxes whose messages also live in a real folder. Fanning
+// out over them returns every labeled/starred message twice.
+function isViewMailbox(path: string): boolean {
+  if (path === "Labels" || path.startsWith("Labels/")) return true;
+  if (path === "Starred") return true;
+  if (path === "All Mail" || path.endsWith("/All Mail")) return true;
+  return false;
 }
 
 /**

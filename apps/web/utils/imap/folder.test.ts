@@ -1,11 +1,11 @@
 import type { ImapFlow, ListResponse } from "imapflow";
 import { describe, expect, it, vi } from "vitest";
 import {
+  findAllMailFolder,
   findArchiveFolder,
   findDraftsFolder,
   findJunkFolder,
   findSentFolder,
-  findTrashFolder,
 } from "@/utils/imap/folder";
 
 function mailbox(path: string, specialUse?: string): ListResponse {
@@ -21,23 +21,47 @@ function mockClient(mailboxes: ListResponse[]) {
   return { client, mailboxCreate };
 }
 
-describe("findTrashFolder", () => {
-  it("returns the special-use trash mailbox", async () => {
+describe("findAllMailFolder", () => {
+  it("returns the special-use all-mail mailbox", async () => {
     const { client } = mockClient([
       mailbox("INBOX"),
-      mailbox("[Gmail]/Bin", "\\Trash"),
+      mailbox("All Mail", "\\All"),
     ]);
-    await expect(findTrashFolder(client)).resolves.toBe("[Gmail]/Bin");
+    await expect(findAllMailFolder(client)).resolves.toBe("All Mail");
   });
 
-  it("returns a folder whose name matches a known trash name", async () => {
-    const { client } = mockClient([mailbox("INBOX"), mailbox("Deleted Items")]);
-    await expect(findTrashFolder(client)).resolves.toBe("Deleted Items");
+  it("detects Bridge's All Mail by exact name when no mailbox has \\All", async () => {
+    const { client } = mockClient([mailbox("INBOX"), mailbox("All Mail")]);
+    await expect(findAllMailFolder(client)).resolves.toBe("All Mail");
   });
 
-  it("returns null when the LIST result has no trash mailbox", async () => {
+  it("accepts the Gmail-style All Mail path without a \\All flag", async () => {
+    const { client } = mockClient([
+      mailbox("INBOX"),
+      mailbox("[Gmail]/All Mail"),
+    ]);
+    await expect(findAllMailFolder(client)).resolves.toBe("[Gmail]/All Mail");
+  });
+
+  it("does not match an All Mail name when a \\All mailbox exists", async () => {
+    const { client } = mockClient([
+      mailbox("Tout", "\\All"),
+      mailbox("All Mail"),
+    ]);
+    await expect(findAllMailFolder(client)).resolves.toBe("Tout");
+  });
+
+  it("returns null when no all-mail mailbox exists", async () => {
     const { client } = mockClient([mailbox("INBOX"), mailbox("Archive")]);
-    await expect(findTrashFolder(client)).resolves.toBeNull();
+    await expect(findAllMailFolder(client)).resolves.toBeNull();
+  });
+
+  it("ignores a Labels child that only mentions All Mail", async () => {
+    const { client } = mockClient([
+      mailbox("INBOX"),
+      mailbox("Labels/All Mail backup"),
+    ]);
+    await expect(findAllMailFolder(client)).resolves.toBeNull();
   });
 });
 

@@ -270,6 +270,72 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     ]);
   });
 
+  it("searches Bridge's unflagged All Mail by name instead of fanning out", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [message(1, "2026-01-01"), message(2, "2026-03-01")],
+      },
+      {
+        path: "All Mail",
+        messages: [message(40, "2026-07-01"), message(41, "2026-08-01")],
+      },
+      {
+        path: "Labels/Work",
+        messages: [message(41, "2026-08-01")],
+      },
+      { path: "Starred", messages: [message(41, "2026-08-01")] },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getMessagesWithPagination({
+      inboxOnly: false,
+      query: "invoice",
+    });
+
+    expect(fake.opened).toEqual(["All Mail"]);
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("All Mail", 41),
+      qualifiedId("All Mail", 40),
+    ]);
+  });
+
+  it("skips Noselect, Labels, and Starred views in fan-out without an all-mail mailbox", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [message(1, "2026-01-01")],
+      },
+      {
+        path: "Labels",
+        flags: ["\\Noselect"],
+        messages: [message(2, "2026-02-01")],
+      },
+      {
+        path: "Labels/Work",
+        messages: [message(1, "2026-01-01")],
+      },
+      {
+        path: "Starred",
+        specialUse: "\\Flagged",
+        messages: [message(1, "2026-01-01")],
+      },
+      { path: "Archive", messages: [message(10, "2026-04-01")] },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getMessagesWithPagination({
+      inboxOnly: false,
+      query: "invoice",
+    });
+
+    expect(fake.opened).toEqual(["INBOX", "Archive"]);
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("Archive", 10),
+      qualifiedId("INBOX", 1),
+    ]);
+  });
+
   it("labels a localized Sent folder from special-use on the simple listing path", async () => {
     const fake = createFakeClient([
       { path: "INBOX", messages: [] },

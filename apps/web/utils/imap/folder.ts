@@ -178,9 +178,30 @@ export async function findDraftsFolder(
 }
 
 /**
- * Find the junk/spam folder path.
- * Returns null when the server lists no junk mailbox.
+ * Find the all-mail mailbox. Proton Bridge's "All Mail" carries no \All
+ * flag, so fall back to an exact path match ("All Mail" itself or a path
+ * ending in "/All Mail", e.g. "[Gmail]/All Mail") only when no mailbox
+ * advertises \All.
  */
+export async function findAllMailFolder(
+  client: ImapFlow,
+): Promise<string | null> {
+  return findAllMailInList(await client.list());
+}
+
+// Pure scan over one LIST result, so callers that already hold the listing
+// (e.g. resolveSearchFolders) don't LIST twice.
+export function findAllMailInList(mailboxes: ListResponse[]): string | null {
+  const flagged = mailboxes.find((mb) => mb.specialUse === "\\All");
+  if (flagged) return flagged.path;
+
+  const named = mailboxes.find(
+    (mb) => mb.path === "All Mail" || mb.path.endsWith("/All Mail"),
+  );
+  if (named) return named.path;
+
+  return null;
+}
 export async function findJunkFolder(client: ImapFlow): Promise<string | null> {
   const mailboxes = await client.list();
 
