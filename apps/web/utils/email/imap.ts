@@ -1222,10 +1222,11 @@ ${messageContent}
   }
 
   async getAttachment(
-    _messageId: string,
-    _attachmentId: string,
+    messageId: string,
+    attachmentId: string,
   ): Promise<{ data: string; size: number }> {
-    throw new UnsupportedImapOperationError("getAttachment");
+    const bytes = await this.downloadAttachmentPart(messageId, attachmentId);
+    return { data: bytes.toString("base64"), size: bytes.length };
   }
 
   async getOriginalMessage(
@@ -1661,11 +1662,39 @@ ${messageContent}
   }
 
   async getAttachmentStream(
-    _messageId: string,
-    _attachmentId: string,
-    _signal?: AbortSignal,
+    messageId: string,
+    attachmentId: string,
+    signal?: AbortSignal,
   ): Promise<ReadableStream<Uint8Array>> {
-    throw new UnsupportedImapOperationError("getAttachmentStream");
+    signal?.throwIfAborted();
+    const bytes = await this.downloadAttachmentPart(messageId, attachmentId);
+    signal?.throwIfAborted();
+    return new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(bytes));
+        controller.close();
+      },
+    });
+  }
+
+  // Attachment ids are MIME part ids from bodyStructure. Open the mailbox
+  // named by the folder-qualified message id and download that part.
+  private async downloadAttachmentPart(
+    messageId: string,
+    attachmentId: string,
+  ): Promise<Buffer> {
+    const { folder, uid } = parseImapMessageId(messageId);
+    return this.withConnection(async (client) => {
+      await client.mailboxOpen(folder, { readOnly: true });
+      const downloaded = await client.download(String(uid), attachmentId, {
+        uid: true,
+      });
+      const chunks: Buffer[] = [];
+      for await (const chunk of downloaded.content) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      return Buffer.concat(chunks);
+    });
   }
 
   async getDraftReferenceForMessage(

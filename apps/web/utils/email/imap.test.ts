@@ -890,6 +890,83 @@ describe("ImapProvider unknown threads", () => {
   });
 });
 
+describe("ImapProvider attachments", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("getAttachment downloads the MIME part and returns base64 bytes", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    const content = Buffer.from("attachment bytes here");
+    fake.client.download = vi.fn(async () => ({
+      content: (async function* () {
+        yield content.subarray(0, 10);
+        yield content.subarray(10);
+      })(),
+    }));
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getAttachment(
+      qualifiedId("INBOX", 1),
+      "2",
+    );
+
+    expect(fake.client.download).toHaveBeenCalledWith("1", "2", {
+      uid: true,
+    });
+    expect(result).toEqual({
+      data: content.toString("base64"),
+      size: content.length,
+    });
+    expect(fake.opened).toEqual(["INBOX"]);
+  });
+
+  it("getAttachmentStream streams the MIME part bytes", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    const content = Buffer.from("streamed bytes");
+    fake.client.download = vi.fn(async () => ({
+      content: (async function* () {
+        yield content;
+      })(),
+    }));
+    connection.client = fake.client;
+
+    const stream = await new ImapProvider(config).getAttachmentStream(
+      qualifiedId("INBOX", 1),
+      "2",
+    );
+    const bytes = Buffer.from(await new Response(stream).arrayBuffer());
+
+    expect(bytes.equals(content)).toBe(true);
+    expect(fake.client.download).toHaveBeenCalledWith("1", "2", {
+      uid: true,
+    });
+  });
+
+  it("getAttachmentStream rejects on an aborted signal without downloading", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    fake.client.download = vi.fn();
+    connection.client = fake.client;
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      new ImapProvider(config).getAttachmentStream(
+        qualifiedId("INBOX", 1),
+        "2",
+        controller.signal,
+      ),
+    ).rejects.toThrow();
+    expect(fake.client.download).not.toHaveBeenCalled();
+  });
+});
+
 describe("ImapProvider restore paths", () => {
   beforeEach(() => {
     connection.client = null;
