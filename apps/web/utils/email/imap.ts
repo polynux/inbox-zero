@@ -50,8 +50,12 @@ import {
   findSentFolder,
   findTrashFolder,
   getOrCreateFolder,
+  hasLabelNamespace,
+  labelNameFromPath,
+  labelPathFromName,
   listFolders,
   listFoldersAsOutlookFolders,
+  listLabelMailboxes,
   moveMessageToFolder,
 } from "@/utils/imap/folder";
 import { parseImapMessageId } from "@/utils/imap/message-id";
@@ -494,7 +498,17 @@ export class ImapProvider implements EmailProvider {
   async getLabels(_options?: {
     includeHidden?: boolean;
   }): Promise<EmailLabel[]> {
-    return this.withConnection(async (client) => listFolders(client));
+    return this.withConnection(async (client) => {
+      if (await hasLabelNamespace(client)) {
+        const paths = await listLabelMailboxes(client);
+        return paths.map((path) => ({
+          id: path,
+          name: labelNameFromPath(path),
+          type: "user",
+        }));
+      }
+      return listFolders(client);
+    });
   }
 
   async getLabelById(labelId: string): Promise<EmailLabel | null> {
@@ -503,10 +517,24 @@ export class ImapProvider implements EmailProvider {
   }
 
   async getLabelByName(name: string): Promise<EmailLabel | null> {
-    const labels = await this.getLabels();
-    return (
-      labels.find((l) => l.name.toLowerCase() === name.toLowerCase()) || null
-    );
+    return this.withConnection(async (client) => {
+      if (await hasLabelNamespace(client)) {
+        const path = labelPathFromName(name);
+        const paths = await listLabelMailboxes(client);
+        const found = paths.find(
+          (candidate) =>
+            candidate.toLowerCase() === path.toLowerCase() ||
+            labelNameFromPath(candidate).toLowerCase() === name.toLowerCase(),
+        );
+        return found
+          ? { id: found, name: labelNameFromPath(found), type: "user" }
+          : null;
+      }
+      const labels = await listFolders(client);
+      return (
+        labels.find((l) => l.name.toLowerCase() === name.toLowerCase()) || null
+      );
+    });
   }
 
   async getOrCreateInboxZeroLabel(_key: InboxZeroLabel): Promise<EmailLabel> {
@@ -523,6 +551,14 @@ export class ImapProvider implements EmailProvider {
 
   async createLabel(name: string, _description?: string): Promise<EmailLabel> {
     return this.withConnection(async (client) => {
+      if (await hasLabelNamespace(client)) {
+        const path = labelPathFromName(name);
+        const existing = await listLabelMailboxes(client);
+        if (!existing.some((p) => p.toLowerCase() === path.toLowerCase())) {
+          await client.mailboxCreate(path);
+        }
+        return { id: path, name: labelNameFromPath(path), type: "user" };
+      }
       await client.mailboxCreate(name);
       return {
         id: name,
@@ -534,6 +570,14 @@ export class ImapProvider implements EmailProvider {
 
   async deleteLabel(labelId: string): Promise<void> {
     return this.withConnection(async (client) => {
+      if (await hasLabelNamespace(client)) {
+        if (!labelId.startsWith("Labels/"))
+          throw new SafeError(
+            `Only Labels/* mailboxes can be deleted as labels (${labelId})`,
+          );
+        await client.mailboxDelete(labelId);
+        return;
+      }
       await assertDeletableFolder(client, labelId);
       await client.mailboxDelete(labelId);
     });
@@ -544,9 +588,23 @@ export class ImapProvider implements EmailProvider {
     labelId: string;
     labelName: string | null;
   }): Promise<{ usedFallback?: boolean; actualLabelId?: string }> {
-    // For IMAP, "labeling" means moving to a folder
     return this.withConnection(async (client) => {
       const { folder, uid } = parseImapMessageId(options.messageId);
+      if (await hasLabelNamespace(client)) {
+        const target =
+          options.labelId.startsWith("Labels/") && options.labelId !== "Labels/"
+            ? options.labelId
+            : labelPathFromName(options.labelName || options.labelId);
+        const existing = await listLabelMailboxes(client);
+        if (!existing.some((p) => p.toLowerCase() === target.toLowerCase())) {
+          await client.mailboxCreate(target);
+        }
+        if (folder === target) return { actualLabelId: target };
+        await client.mailboxOpen(folder);
+        await client.messageCopy(String(uid), target, { uid: true });
+        return { actualLabelId: target };
+      }
+      // No label namespace: "labeling" means moving to a folder.
       if (folder === options.labelId) return { actualLabelId: options.labelId };
       await client.mailboxOpen(folder);
       await moveMessageToFolder(client, uid, options.labelId);
@@ -554,20 +612,34 @@ export class ImapProvider implements EmailProvider {
     });
   }
 
-  async removeThreadLabel(threadId: string, _labelId: string): Promise<void> {
-    // For IMAP, removing a "label" would mean moving back to INBOX
-    // This is a no-op for folder-based systems since a message can only be in one folder
-    this.logger.warn("removeThreadLabel is a no-op for IMAP", {
-      threadId,
+  async removeThreadLabel(threadId: string, labelId: string): Promise<void> {
+    return this.withConnection(async (client) => {
+      if (!(await hasLabelNamespace(client))) {
+        // No label namespace: a message lives in one folder, so there is
+        // nothing to detach without moving it.
+        this.logger.warn("removeThreadLabel is a no-op for IMAP", {
+          threadId,
+        });
+        return;
+      }
+      await removeProtonThreadLabel(client, threadId, labelId);
     });
   }
 
   async removeThreadLabels(
     threadId: string,
-    _labelIds: string[],
+    labelIds: string[],
   ): Promise<void> {
-    this.logger.warn("removeThreadLabels is a no-op for IMAP", {
-      threadId,
+    return this.withConnection(async (client) => {
+      if (!(await hasLabelNamespace(client))) {
+        this.logger.warn("removeThreadLabels is a no-op for IMAP", {
+          threadId,
+        });
+        return;
+      }
+      for (const labelId of labelIds) {
+        await removeProtonThreadLabel(client, threadId, labelId);
+      }
     });
   }
 
@@ -1875,6 +1947,39 @@ const PROTECTED_SPECIAL_USE = new Set([
   "\\Archive",
   "\\All",
 ]);
+
+// Remove a Proton label from every message of a thread: open Labels/<name>,
+// find each member by its Message-ID header, flag \Deleted and expunge
+// there ONLY. The message's real folder copy is never touched, and like
+// Gmail's 200-success for a vanished thread, removing an absent label is a
+// no-op rather than an error.
+async function removeProtonThreadLabel(
+  client: ImapFlow,
+  threadId: string,
+  labelId: string,
+): Promise<void> {
+  const labelFolder = labelId.startsWith("Labels/")
+    ? labelId
+    : labelPathFromName(labelId);
+  const messages = await fetchThreadMessages(client, threadId);
+  const wanted = new Set(
+    messages.flatMap((message) =>
+      message.headers["message-id"]
+        ? [message.headers["message-id"].replace(/^<|>$/g, "")]
+        : [],
+    ),
+  );
+  if (wanted.size === 0) return;
+  await client.mailboxOpen(labelFolder);
+  for (const messageId of wanted) {
+    const uids = await searchImapMessages(client, {
+      header: { "Message-ID": messageId },
+    });
+    for (const uid of uids) {
+      await client.messageDelete(String(uid), { uid: true });
+    }
+  }
+}
 
 async function assertDeletableFolder(
   client: ImapFlow,

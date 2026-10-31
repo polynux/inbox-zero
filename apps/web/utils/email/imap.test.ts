@@ -2,8 +2,8 @@ import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImapProvider } from "@/utils/email/imap";
 import * as mailModule from "@/utils/imap/mail";
+import { buildThreadId } from "@/utils/imap/thread";
 const connection = vi.hoisted(() => ({ client: null as unknown }));
-
 vi.mock("@/utils/imap/client", () => ({
   withImapConnection: async <T>(
     _config: unknown,
@@ -102,7 +102,11 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       const mailbox = mailboxes.find((candidate) => candidate.path === path);
       if (!mailbox) throw new Error(`mailbox ${path} not found`);
       current = mailbox;
-      client.mailbox = { path, specialUse: mailbox.specialUse };
+      client.mailbox = {
+        path,
+        specialUse: mailbox.specialUse,
+        exists: mailbox.messages.length,
+      };
       opened.push(path);
       return {
         exists: mailbox.messages.length,
@@ -949,5 +953,281 @@ describe("ImapProvider restore paths", () => {
     await expect(
       new ImapProvider(config).archiveMessages([qualifiedId("INBOX", 1)]),
     ).rejects.toThrow(/UID not found/);
+  });
+});
+
+describe("ImapProvider Proton labels (Labels/* namespace)", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  function protonMailboxes() {
+    return [
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "a@x.com", undefined, {
+            messageId: "<root@x>",
+          }),
+        ],
+      },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels/Work", messages: [] },
+    ];
+  }
+
+  it("lists only Labels/* children as labels", async () => {
+    const fake = createFakeClient(protonMailboxes());
+    connection.client = fake.client;
+
+    const labels = await new ImapProvider(config).getLabels();
+
+    expect(labels).toEqual([{ id: "Labels/Work", name: "Work", type: "user" }]);
+  });
+
+  it("applies a label by COPY into Labels/X without removing INBOX", async () => {
+    const fake = createFakeClient(protonMailboxes());
+    const copied: Array<{ uid: number; to: string; from: string }> = [];
+    fake.client.messageCopy = vi.fn(async (uid: string, to: string) => {
+      copied.push({ uid: Number(uid), to, from: fake.opened.at(-1) || "" });
+      const inbox = mailboxesOf(fake).INBOX;
+      const found = inbox.find((m) => m.uid === Number(uid));
+      if (found) mailboxesOf(fake)["Labels/Work"].push(found);
+    });
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).labelMessage({
+      messageId: qualifiedId("INBOX", 1),
+      labelId: "Labels/Work",
+      labelName: "Work",
+    });
+
+    expect(result).toEqual({ actualLabelId: "Labels/Work" });
+    expect(copied).toEqual([{ uid: 1, to: "Labels/Work", from: "INBOX" }]);
+    expect(mailboxesOf(fake).INBOX).toHaveLength(1);
+    expect(mailboxesOf(fake)["Labels/Work"]).toHaveLength(1);
+  });
+
+  it("creates Labels/X on apply when it does not exist", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "a@x.com", undefined, {
+            messageId: "<root@x>",
+          }),
+        ],
+      },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+    ]);
+    fake.client.mailboxCreate = vi.fn(async (path: string) => {
+      mailboxesOf(fake)[path] = [];
+    });
+    const copied: Array<{ uid: number; to: string }> = [];
+    fake.client.messageCopy = vi.fn(async (uid: string, to: string) => {
+      copied.push({ uid: Number(uid), to });
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).labelMessage({
+      messageId: qualifiedId("INBOX", 1),
+      labelId: "Labels/New",
+      labelName: "New",
+    });
+
+    expect(fake.client.mailboxCreate).toHaveBeenCalledWith("Labels/New");
+    expect(copied).toEqual([{ uid: 1, to: "Labels/New" }]);
+    expect(mailboxesOf(fake).INBOX).toHaveLength(1);
+  });
+
+  it("removes a label by expunging only from Labels/X, keeping INBOX", async () => {
+    const root = message(1, "2026-01-01", "a@x.com", undefined, {
+      messageId: "<root@x>",
+    });
+    const labeled = message(9, "2026-01-01", "a@x.com", undefined, {
+      messageId: "<root@x>",
+    });
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [root] },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels/Work", messages: [labeled] },
+    ]);
+    const deleted: Array<{ uid: number; folder: string }> = [];
+    fake.client.messageDelete = vi.fn(async (uid: string) => {
+      deleted.push({ uid: Number(uid), folder: fake.opened.at(-1) || "" });
+      const list = mailboxesOf(fake)["Labels/Work"];
+      const index = list.findIndex((m) => m.uid === Number(uid));
+      if (index >= 0) list.splice(index, 1);
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).removeThreadLabel(
+      buildThreadId(undefined, undefined, "<root@x>"),
+      "Labels/Work",
+    );
+
+    expect(deleted).toEqual([{ uid: 9, folder: "Labels/Work" }]);
+    expect(mailboxesOf(fake)["Labels/Work"]).toEqual([]);
+    expect(mailboxesOf(fake).INBOX).toHaveLength(1);
+  });
+
+  it("keeps MOVE semantics for labelMessage on servers without a Labels namespace", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+      { path: "Projects", messages: [] },
+    ]);
+    const moved: Array<{ uid: number; to: string }> = [];
+    fake.client.messageMove = vi.fn(async (uid: string, to: string) => {
+      moved.push({ uid: Number(uid), to });
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).labelMessage({
+      messageId: qualifiedId("INBOX", 1),
+      labelId: "Projects",
+      labelName: null,
+    });
+
+    expect(moved).toEqual([{ uid: 1, to: "Projects" }]);
+  });
+
+  it("resolves labels by id and by name inside the namespace", async () => {
+    const fake = createFakeClient(protonMailboxes());
+    connection.client = fake.client;
+    const provider = new ImapProvider(config);
+
+    await expect(provider.getLabelById("Labels/Work")).resolves.toEqual({
+      id: "Labels/Work",
+      name: "Work",
+      type: "user",
+    });
+    await expect(provider.getLabelById("Labels/Missing")).resolves.toBeNull();
+    await expect(provider.getLabelByName("Work")).resolves.toEqual({
+      id: "Labels/Work",
+      name: "Work",
+      type: "user",
+    });
+    await expect(provider.getLabelByName("Missing")).resolves.toBeNull();
+  });
+
+  it("createLabel creates Labels/<name> and deleteLabel removes only Labels/*", async () => {
+    const fake = createFakeClient(protonMailboxes());
+    fake.client.mailboxCreate = vi.fn(async (path: string) => {
+      mailboxesOf(fake)[path] = [];
+    });
+    fake.client.mailboxDelete = vi.fn(async (path: string) => {
+      delete mailboxesOf(fake)[path];
+    });
+    connection.client = fake.client;
+    const provider = new ImapProvider(config);
+
+    await expect(provider.createLabel("New")).resolves.toEqual({
+      id: "Labels/New",
+      name: "New",
+      type: "user",
+    });
+    expect(fake.client.mailboxCreate).toHaveBeenCalledWith("Labels/New");
+    await provider.deleteLabel("Labels/Work");
+    expect(fake.client.mailboxDelete).toHaveBeenCalledWith("Labels/Work");
+    await expect(provider.deleteLabel("INBOX")).rejects.toThrow(/only Labels/i);
+  });
+
+  it("getThreadsWithLabel reads the label mailbox", async () => {
+    const labeled = message(9, "2026-01-01", "a@x.com", undefined, {
+      messageId: "<root@x>",
+    });
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "a@x.com", undefined, {
+            messageId: "<root@x>",
+          }),
+        ],
+      },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels/Work", messages: [labeled] },
+    ]);
+    connection.client = fake.client;
+
+    const threads = await new ImapProvider(config).getThreadsWithLabel({
+      labelId: "Labels/Work",
+    });
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0].messages.map((m) => m.id)).toEqual([
+      qualifiedId("Labels/Work", 9),
+    ]);
+  });
+
+  it("removeThreadLabels removes every named label", async () => {
+    const labeledWork = message(9, "2026-01-01", "a@x.com", undefined, {
+      messageId: "<root@x>",
+    });
+    const labeledBills = message(11, "2026-01-01", "a@x.com", undefined, {
+      messageId: "<root@x>",
+    });
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "a@x.com", undefined, {
+            messageId: "<root@x>",
+          }),
+        ],
+      },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels/Work", messages: [labeledWork] },
+      { path: "Labels/Bills", messages: [labeledBills] },
+    ]);
+    const deleted: Array<{ uid: number; folder: string }> = [];
+    fake.client.messageDelete = vi.fn(async (uid: string) => {
+      const folder = fake.opened.at(-1) || "";
+      deleted.push({ uid: Number(uid), folder });
+      const list = mailboxesOf(fake)[folder];
+      const index = list.findIndex((m) => m.uid === Number(uid));
+      if (index >= 0) list.splice(index, 1);
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).removeThreadLabels(
+      buildThreadId(undefined, undefined, "<root@x>"),
+      ["Labels/Work", "Labels/Bills"],
+    );
+
+    expect(deleted).toEqual([
+      { uid: 9, folder: "Labels/Work" },
+      { uid: 11, folder: "Labels/Bills" },
+    ]);
+    expect(mailboxesOf(fake).INBOX).toHaveLength(1);
+  });
+
+  it("archiveThreadWithLabel keeps MOVE semantics for folders on Proton", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "a@x.com", undefined, {
+            messageId: "<root@x>",
+          }),
+        ],
+      },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels/Work", messages: [] },
+      { path: "Folders/Archive", messages: [] },
+    ]);
+    const moved: Array<{ uid: number; to: string; from: string }> = [];
+    fake.client.messageMove = vi.fn(async (uid: string, to: string) => {
+      moved.push({ uid: Number(uid), to, from: fake.opened.at(-1) || "" });
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).archiveThreadWithLabel(
+      buildThreadId(undefined, undefined, "<root@x>"),
+      "owner@example.com",
+      "Folders/Archive",
+    );
+
+    expect(moved).toEqual([{ uid: 1, to: "Folders/Archive", from: "INBOX" }]);
   });
 });

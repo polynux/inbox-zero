@@ -6,6 +6,10 @@ import {
   findDraftsFolder,
   findJunkFolder,
   findSentFolder,
+  hasLabelNamespace,
+  labelNameFromPath,
+  labelPathFromName,
+  listLabelMailboxes,
 } from "@/utils/imap/folder";
 
 function mailbox(path: string, specialUse?: string): ListResponse {
@@ -129,5 +133,33 @@ describe("findJunkFolder", () => {
   it("returns null when the LIST result has no junk mailbox", async () => {
     const { client } = mockClient([mailbox("INBOX"), mailbox("Archive")]);
     await expect(findJunkFolder(client)).resolves.toBeNull();
+  });
+});
+
+describe("Proton label namespace", () => {
+  it("detects a Labels namespace and lists only its children", async () => {
+    const { client } = mockClient([
+      mailbox("INBOX"),
+      mailbox("Labels"),
+      mailbox("Labels/Work"),
+      mailbox("Labels/Receipts"),
+    ]);
+    await expect(hasLabelNamespace(client)).resolves.toBe(true);
+    await expect(listLabelMailboxes(client)).resolves.toEqual([
+      "Labels/Work",
+      "Labels/Receipts",
+    ]);
+  });
+
+  it("reports no namespace for plain folders", async () => {
+    const { client } = mockClient([mailbox("INBOX"), mailbox("Projects")]);
+    await expect(hasLabelNamespace(client)).resolves.toBe(false);
+    await expect(listLabelMailboxes(client)).resolves.toEqual([]);
+  });
+
+  it("converts between label paths and names", () => {
+    expect(labelNameFromPath("Labels/Work")).toBe("Work");
+    expect(labelPathFromName("Work")).toBe("Labels/Work");
+    expect(labelPathFromName("Labels/Work")).toBe("Labels/Work");
   });
 });

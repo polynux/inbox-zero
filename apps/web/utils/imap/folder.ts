@@ -218,3 +218,30 @@ export async function findJunkFolder(client: ImapFlow): Promise<string | null> {
 
   return null;
 }
+
+// Proton label namespace: a top-level `Labels` mailbox (with children)
+// means labels are views, not locations. A message lives in exactly one
+// real folder and additionally appears in Labels/* mailboxes; COPY into
+// Labels/X applies a label, expunging from Labels/X removes it.
+export async function hasLabelNamespace(client: ImapFlow): Promise<boolean> {
+  const mailboxes = await client.list();
+  return mailboxes.some(
+    (mb) => mb.path === "Labels" || mb.path.startsWith("Labels/"),
+  );
+}
+
+export async function listLabelMailboxes(client: ImapFlow): Promise<string[]> {
+  const mailboxes = await client.list();
+  if (!mailboxes.some((mb) => mb.path === "Labels")) return [];
+  return mailboxes
+    .filter((mb) => mb.path.startsWith("Labels/"))
+    .map((mb) => mb.path);
+}
+
+export function labelNameFromPath(path: string): string {
+  return path.startsWith("Labels/") ? path.slice("Labels/".length) : path;
+}
+
+export function labelPathFromName(name: string): string {
+  return name.startsWith("Labels/") ? name : `Labels/${name}`;
+}
