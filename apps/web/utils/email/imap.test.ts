@@ -967,6 +967,74 @@ describe("ImapProvider attachments", () => {
   });
 });
 
+describe("ImapProvider starring", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("starMessage adds \\Flagged in the message's own folder without moving it", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [message(1, "2026-01-01"), message(2, "2026-02-01")],
+      },
+      { path: "Starred", messages: [] },
+    ]);
+    const flagged: Array<{ uid: number; folder: string; flag: string }> = [];
+    fake.client.messageFlagsAdd = vi.fn(
+      async (uid: string, flags: string[]) => {
+        flagged.push({
+          uid: Number(uid),
+          folder: fake.opened.at(-1) || "",
+          flag: flags[0],
+        });
+      },
+    );
+    const moved: unknown[] = [];
+    fake.client.messageMove = vi.fn(async (...args: unknown[]) => {
+      moved.push(args);
+    });
+    fake.client.messageCopy = vi.fn(async (...args: unknown[]) => {
+      moved.push(args);
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).starMessage(qualifiedId("INBOX", 2));
+
+    expect(flagged).toEqual([{ uid: 2, folder: "INBOX", flag: "\\Flagged" }]);
+    expect(moved).toEqual([]);
+    expect(fake.opened).toEqual(["INBOX"]);
+  });
+
+  it("markMessagesStarredState removes \\Flagged in each message's own folder", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+      { path: "Archive", messages: [message(1, "2026-01-02")] },
+    ]);
+    const removed: Array<{ uid: number; folder: string; flag: string }> = [];
+    fake.client.messageFlagsRemove = vi.fn(
+      async (uid: string, flags: string[]) => {
+        removed.push({
+          uid: Number(uid),
+          folder: fake.opened.at(-1) || "",
+          flag: flags[0],
+        });
+      },
+    );
+    connection.client = fake.client;
+
+    await new ImapProvider(config).markMessagesStarredState(
+      [qualifiedId("INBOX", 1), qualifiedId("Archive", 1)],
+      false,
+    );
+
+    expect(removed).toEqual([
+      { uid: 1, folder: "INBOX", flag: "\\Flagged" },
+      { uid: 1, folder: "Archive", flag: "\\Flagged" },
+    ]);
+  });
+});
+
 describe("ImapProvider restore paths", () => {
   beforeEach(() => {
     connection.client = null;
