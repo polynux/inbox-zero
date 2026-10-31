@@ -1,10 +1,27 @@
 import type { ImapFlow } from "imapflow";
+import MailComposer from "nodemailer/lib/mail-composer";
+import type { Attachment as MailAttachment } from "nodemailer/lib/mailer";
 import { randomUUID } from "node:crypto";
+import { simpleParser } from "mailparser";
 import { DraftNotFoundError, SafeError } from "@/utils/error";
 import { fetchMessageByUid, searchImapMessages } from "@/utils/imap/message";
 import { findDraftsFolder } from "@/utils/imap/folder";
 import { parseImapMessageId } from "@/utils/imap/message-id";
 import type { ParsedMessage } from "@/utils/types";
+
+// Stable per-file id across draft rebuilds, same header Gmail stamps so the
+// composer can remove a file it attached earlier.
+export const DRAFT_ATTACHMENT_ID_HEADER = "X-Attachment-Id";
+
+export type DraftAttachmentPart = {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  disposition: "attachment" | "inline";
+  contentId?: string;
+  content: Buffer;
+};
 
 export type SaveDraftOptions = {
   from: string;
@@ -17,6 +34,7 @@ export type SaveDraftOptions = {
   inReplyTo?: string;
   references?: string;
   messageId?: string;
+  attachments?: MailAttachment[];
 };
 
 export type ResolvedDraft = {
@@ -84,39 +102,13 @@ export async function appendDraftMessage(
   if (!normalizedMessageId) throw new SafeError("Draft Message-ID is missing");
   const messageId = `<${normalizedMessageId}>`;
 
-  const messageParts: string[] = [
-    `From: ${stripHeaderBreaks(options.from)}`,
-    `To: ${stripHeaderBreaks(options.to)}`,
-    ...(options.cc ? [`Cc: ${stripHeaderBreaks(options.cc)}`] : []),
-    ...(options.bcc ? [`Bcc: ${stripHeaderBreaks(options.bcc)}`] : []),
-    `Subject: ${stripHeaderBreaks(options.subject)}`,
-    `Date: ${new Date().toUTCString()}`,
-    `Message-ID: ${messageId}`,
-    "MIME-Version: 1.0",
-  ];
-
-  if (options.inReplyTo) {
-    messageParts.push(`In-Reply-To: ${stripHeaderBreaks(options.inReplyTo)}`);
-  }
-  if (options.references) {
-    messageParts.push(`References: ${stripHeaderBreaks(options.references)}`);
-  }
-
-  if (options.html) {
-    messageParts.push("Content-Type: text/html; charset=utf-8");
-    messageParts.push("");
-    messageParts.push(options.html);
-  } else {
-    messageParts.push("Content-Type: text/plain; charset=utf-8");
-    messageParts.push("");
-    messageParts.push(options.text || "");
-  }
-
-  const rawMessage = messageParts.join("\r\n");
+  // Attachment drafts go through the MIME builder so files and inline images
+  // keep their parts; plain drafts keep the hand-built single-part body.
+  const raw = await buildDraftMime({ ...options, messageId });
 
   const result = await client.append(
     draftsFolder,
-    Buffer.from(rawMessage),
+    raw,
     ["\\Draft", "\\Seen"],
     new Date(),
   );
@@ -143,6 +135,134 @@ export async function appendDraftMessage(
       "Failed to save draft: server did not return a UID (no UIDPLUS support)",
     );
   return { id: encodeImapDraftId(normalizedMessageId), uid };
+}
+
+export async function buildDraftMime(
+  options: SaveDraftOptions & { messageId: string },
+): Promise<Buffer> {
+  if (!options.attachments?.length)
+    return Buffer.from(buildPlainDraftMessage(options));
+  const messageIdHeader = stripHeaderBreaks(options.messageId);
+  const compiled = new MailComposer({
+    from: stripHeaderBreaks(options.from),
+    to: stripHeaderBreaks(options.to),
+    cc: options.cc ? stripHeaderBreaks(options.cc) : undefined,
+    bcc: options.bcc ? stripHeaderBreaks(options.bcc) : undefined,
+    subject: stripHeaderBreaks(options.subject),
+    messageId: messageIdHeader,
+    date: new Date().toUTCString(),
+    inReplyTo: options.inReplyTo
+      ? stripHeaderBreaks(options.inReplyTo)
+      : undefined,
+    references: options.references
+      ? stripHeaderBreaks(options.references)
+      : undefined,
+    ...(options.html ? { html: options.html } : { text: options.text || "" }),
+    attachments: options.attachments,
+  }).compile();
+  compiled.keepBcc = true;
+  return compiled.build();
+}
+
+function buildPlainDraftMessage(
+  options: SaveDraftOptions & { messageId: string },
+): string {
+  const messageParts: string[] = [
+    `From: ${stripHeaderBreaks(options.from)}`,
+    `To: ${stripHeaderBreaks(options.to)}`,
+    ...(options.cc ? [`Cc: ${stripHeaderBreaks(options.cc)}`] : []),
+    ...(options.bcc ? [`Bcc: ${stripHeaderBreaks(options.bcc)}`] : []),
+    `Subject: ${stripHeaderBreaks(options.subject)}`,
+    `Date: ${new Date().toUTCString()}`,
+    `Message-ID: ${options.messageId}`,
+    "MIME-Version: 1.0",
+  ];
+
+  if (options.inReplyTo) {
+    messageParts.push(`In-Reply-To: ${stripHeaderBreaks(options.inReplyTo)}`);
+  }
+  if (options.references) {
+    messageParts.push(`References: ${stripHeaderBreaks(options.references)}`);
+  }
+
+  if (options.html) {
+    messageParts.push("Content-Type: text/html; charset=utf-8");
+    messageParts.push("");
+    messageParts.push(options.html);
+  } else {
+    messageParts.push("Content-Type: text/plain; charset=utf-8");
+    messageParts.push("");
+    messageParts.push(options.text || "");
+  }
+
+  return messageParts.join("\r\n");
+}
+
+// Read a draft's files back from its MIME so a rebuild can carry them: the
+// raw source is the only store, since APPEND keeps no attachment metadata.
+export async function readDraftAttachmentParts(
+  source: Buffer,
+): Promise<DraftAttachmentPart[]> {
+  const parsed = await simpleParser(source);
+  const seen = new Map<string, number>();
+  return parsed.attachments.map((part) => {
+    const stamped = part.headers
+      .get(DRAFT_ATTACHMENT_ID_HEADER.toLowerCase())
+      ?.toString();
+    const filename = part.filename || "attachment";
+    const mimeType = part.contentType || "application/octet-stream";
+    return {
+      id:
+        stamped && /^[\w-]{1,64}$/u.test(stamped)
+          ? stamped
+          : derivedDraftAttachmentId(seen, filename, mimeType, part.size),
+      filename,
+      mimeType,
+      size: part.size,
+      disposition:
+        part.contentDisposition === "inline" ? "inline" : "attachment",
+      ...(part.contentId
+        ? { contentId: part.contentId.replace(/^<|>$/g, "") }
+        : {}),
+      content: part.content,
+    };
+  });
+}
+
+export function toDraftMailAttachment(
+  part: Pick<
+    DraftAttachmentPart,
+    "id" | "filename" | "mimeType" | "disposition" | "contentId"
+  > & { content: Buffer },
+): MailAttachment {
+  const inline = part.disposition === "inline" && part.contentId;
+  return {
+    filename: part.filename,
+    contentType: part.mimeType,
+    content: part.content,
+    // An attached email must keep a 7bit or 8bit encoding (RFC 2046), so the
+    // builder picks it; every other file is base64.
+    ...(part.mimeType.startsWith("message/")
+      ? {}
+      : { contentTransferEncoding: "base64" }),
+    contentDisposition: inline ? "inline" : "attachment",
+    ...(inline ? { cid: part.contentId } : {}),
+    headers: { [DRAFT_ATTACHMENT_ID_HEADER]: part.id },
+  };
+}
+
+// Files the composer didn't stamp (forwards, other clients) still need a
+// stable id within the draft; filename + type + size disambiguates repeats.
+function derivedDraftAttachmentId(
+  seen: Map<string, number>,
+  filename: string,
+  mimeType: string,
+  size: number,
+): string {
+  const base = `${filename}:${mimeType}:${size}`;
+  const count = seen.get(base) ?? 0;
+  seen.set(base, count + 1);
+  return count === 0 ? base : `${base}:${count}`;
 }
 
 // Find the draft carrying this Message-ID in the open Drafts folder. Bridge's

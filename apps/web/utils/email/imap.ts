@@ -1,5 +1,6 @@
 import type { Attachment as MailAttachment } from "nodemailer/lib/mailer";
 import type { ImapFlow, MailboxObject } from "imapflow";
+import { randomBytes } from "node:crypto";
 import type { ThreadsQuery } from "@/utils/threads/validation";
 import type { LocalMailSyncRequest } from "@/utils/actions/local-mail-sync.validation";
 import type { EmailContact } from "@/utils/email/contact";
@@ -65,13 +66,22 @@ import {
 } from "@/utils/imap/message-id";
 import {
   appendDraftMessage,
-  assertDraftHasNoAttachments,
+  buildDraftMime,
   draftNotFoundError,
   encodeImapDraftId,
   findDraftByMessageId,
+  readDraftAttachmentParts,
   resolveDraftUid,
   saveDraft,
+  toDraftMailAttachment,
+  type DraftAttachmentPart,
+  type ResolvedDraft,
 } from "@/utils/imap/draft";
+import {
+  assertDraftAttachmentLimits,
+  type DraftMessageUploadPart,
+  getDraftMessageUploadLength,
+} from "@/utils/email/draft-attachment-upload";
 import { sendSmtpEmail } from "@/utils/imap/mail";
 import { toMailerAttachments } from "@/utils/types/mail";
 import {
@@ -1379,7 +1389,8 @@ ${messageContent}
 
   // IMAP can't edit a message: APPEND the updated copy with the same
   // Message-ID (so the stable draft id survives), then expunge the old UID.
-  // Append-first keeps a failure from losing the draft.
+  // Append-first keeps a failure from losing the draft. The rebuild carries
+  // the draft's files, so a text save never drops them.
   async updateDraft(
     draftId: string,
     params: {
@@ -1394,12 +1405,12 @@ ${messageContent}
     await this.withConnection(async (client) => {
       const resolved = await resolveDraftUid(client, draftId);
       if (!resolved) throw draftNotFoundError("update");
-      assertDraftHasNoAttachments(resolved.message, "update");
       const headers = resolved.message.headers;
       const messageId = headers["message-id"];
       // Without the current Message-ID there is no id to keep stable: a
       // fresh id would orphan the caller's draft.
       if (!messageId) throw draftNotFoundError("update");
+      const parts = await this.readDraftParts(client, resolved);
       await appendDraftMessage(client, resolved.folder, {
         from: params.from ?? headers.from,
         to: params.to ?? headers.to ?? "",
@@ -1410,6 +1421,9 @@ ${messageContent}
         inReplyTo: headers["in-reply-to"],
         references: headers.references,
         messageId,
+        ...(parts.length
+          ? { attachments: parts.map((part) => toDraftMailAttachment(part)) }
+          : {}),
       });
       await client.messageDelete(String(resolved.uid), { uid: true });
     });
@@ -1436,8 +1450,8 @@ ${messageContent}
     return this.withConnection(async (client) => {
       const resolved = await resolveDraftUid(client, draftId);
       if (!resolved) throw draftNotFoundError("send");
-      assertDraftHasNoAttachments(resolved.message, "send");
       const headers = resolved.message.headers;
+      const parts = await this.readDraftParts(client, resolved);
       const { messageId } = await sendSmtpEmail(this.config, {
         to: headers.to ?? "",
         from: headers.from || undefined,
@@ -1447,6 +1461,9 @@ ${messageContent}
         html: resolved.message.textHtml ?? "",
         inReplyTo: headers["in-reply-to"],
         references: headers.references,
+        ...(parts.length
+          ? { attachments: parts.map((part) => toDraftMailAttachment(part)) }
+          : {}),
       });
       await client.messageDelete(String(resolved.uid), { uid: true });
       return {
@@ -2118,31 +2135,210 @@ ${messageContent}
   }
 
   async getDraftAttachments(
-    _draftId: string,
+    draftId: string,
   ): Promise<DraftAttachmentsResult | null> {
-    // IMAP drafts are raw APPENDs with no attachment metadata tracking
-    return null;
+    return this.withConnection(async (client) => {
+      const resolved = await resolveDraftUid(client, draftId, {
+        readOnly: true,
+      });
+      if (!resolved) return null;
+      const parts = await this.readDraftParts(client, resolved);
+      const messageId = encodeImapMessageId(resolved.folder, resolved.uid);
+      return {
+        messageId,
+        attachments: parts.map((part) => ({
+          id: part.id,
+          filename: part.filename,
+          mimeType: part.mimeType,
+          size: part.size,
+          disposition: part.disposition,
+          ...(part.contentId ? { contentId: part.contentId } : {}),
+          messageId,
+          // The composer re-upload path reads bytes through the attachment
+          // route, which needs a provider part id; IMAP has none per part,
+          // so it re-reads the whole draft.
+          providerAttachmentId: part.id,
+        })),
+      };
+    });
   }
 
+  // IMAP has no per-attachment draft API: like Gmail, every change rebuilds
+  // the whole draft MIME (APPEND with the same Message-ID, then expunge the
+  // old copy) so the stable draft id survives.
   async addDraftAttachment(
-    _draftId: string,
-    _attachment: DraftAttachmentMetadata & { content: Buffer },
+    draftId: string,
+    attachment: DraftAttachmentMetadata & { content: Buffer },
   ): Promise<DraftAttachmentsResult & { attachmentId: string }> {
-    throw new UnsupportedImapOperationError("addDraftAttachment");
+    return this.withConnection(async (client) => {
+      const resolved = await this.requireDraftForAttachment(client, draftId);
+      const parts = await this.readDraftParts(client, resolved);
+      const kept = parts.filter((part) => part.id !== attachment.id);
+      assertDraftAttachmentLimits(kept, attachment.size);
+      await this.replaceDraftKeepingId(client, resolved, [
+        ...kept.map((part) => toDraftMailAttachment(part)),
+        toDraftMailAttachment({
+          id: attachment.id,
+          filename: attachment.filename,
+          mimeType: attachment.mimeType,
+          disposition: attachment.disposition,
+          ...(attachment.contentId ? { contentId: attachment.contentId } : {}),
+          content: attachment.content,
+        }),
+      ]);
+      const result = await this.getDraftAttachments(draftId);
+      if (!result) throw draftNotFoundError("attach to");
+      return { ...result, attachmentId: attachment.id };
+    });
   }
 
   async removeDraftAttachment(
-    _draftId: string,
-    _attachmentId: string,
+    draftId: string,
+    attachmentId: string,
   ): Promise<DraftAttachmentsResult> {
-    throw new UnsupportedImapOperationError("removeDraftAttachment");
+    return this.withConnection(async (client) => {
+      const resolved = await this.requireDraftForAttachment(client, draftId);
+      const parts = await this.readDraftParts(client, resolved);
+      if (!parts.some((part) => part.id === attachmentId))
+        throw new SafeError("This file is no longer on the draft.");
+      await this.replaceDraftKeepingId(
+        client,
+        resolved,
+        parts
+          .filter((part) => part.id !== attachmentId)
+          .map((part) => toDraftMailAttachment(part)),
+      );
+      const result = await this.getDraftAttachments(draftId);
+      if (!result) throw draftNotFoundError("remove an attachment from");
+      return result;
+    });
   }
 
   async startDraftAttachmentUpload(
-    _draftId: string,
-    _attachment: DraftAttachmentMetadata,
+    draftId: string,
+    attachment: DraftAttachmentMetadata,
   ): Promise<DraftAttachmentUploadStart> {
-    throw new UnsupportedImapOperationError("startDraftAttachmentUpload");
+    return this.withConnection(async (client) => {
+      const resolved = await this.requireDraftForAttachment(client, draftId);
+      const parts = await this.readDraftParts(client, resolved);
+      const existing = parts.filter((part) => part.id !== attachment.id);
+      assertDraftAttachmentLimits(existing, attachment.size);
+      if (
+        [...existing, attachment].some((item) =>
+          item.mimeType.startsWith("message/"),
+        )
+      )
+        throw new SafeError(
+          "Large files can't be added to a draft that has an attached email. Attach a file under 3 MB, or remove the attached email.",
+        );
+      const slots = [
+        ...existing.map((part) => ({
+          attachment: part,
+          part: {
+            type: "attachment" as const,
+            attachmentId: part.id,
+            size: part.size,
+            source: {
+              messageId: encodeImapMessageId(resolved.folder, resolved.uid),
+              providerAttachmentId: part.id,
+            },
+          },
+        })),
+        {
+          attachment,
+          part: {
+            type: "attachment" as const,
+            attachmentId: attachment.id,
+            size: attachment.size,
+          },
+        },
+      ].map((slot) => {
+        // A short placeholder whose base64 fits one line, so it can be found
+        // in the built message and swapped for the real file.
+        const content = Buffer.from(randomBytes(15).toString("hex"));
+        return { ...slot, content, encoded: content.toString("base64") };
+      });
+      const template = await this.buildDraftUploadTemplate(
+        resolved,
+        slots.map((slot) =>
+          toDraftMailAttachment({ ...slot.attachment, content: slot.content }),
+        ),
+      );
+      return templateToUploadStart(template, slots);
+    });
+  }
+
+  // Reads a draft's files from its raw MIME: APPEND keeps no attachment
+  // metadata, so the source is the only store. The Drafts folder stays open
+  // on the resolved folder throughout.
+  private async readDraftParts(
+    client: ImapFlow,
+    resolved: ResolvedDraft,
+  ): Promise<DraftAttachmentPart[]> {
+    await client.mailboxOpen(resolved.folder, { readOnly: true });
+    const downloaded = await client.download(String(resolved.uid), undefined, {
+      uid: true,
+    });
+    const chunks: Buffer[] = [];
+    for await (const chunk of downloaded.content) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return readDraftAttachmentParts(Buffer.concat(chunks));
+  }
+
+  private async requireDraftForAttachment(
+    client: ImapFlow,
+    draftId: string,
+  ): Promise<ResolvedDraft> {
+    const resolved = await resolveDraftUid(client, draftId);
+    if (!resolved) throw draftNotFoundError("attach to");
+    if (!resolved.message.headers["message-id"])
+      throw draftNotFoundError("attach to");
+    return resolved;
+  }
+
+  private async replaceDraftKeepingId(
+    client: ImapFlow,
+    resolved: ResolvedDraft,
+    attachments: MailAttachment[],
+  ): Promise<void> {
+    const headers = resolved.message.headers;
+    const messageId = headers["message-id"];
+    if (!messageId) throw draftNotFoundError("update");
+    await appendDraftMessage(client, resolved.folder, {
+      from: headers.from,
+      to: headers.to ?? "",
+      cc: headers.cc,
+      bcc: headers.bcc,
+      subject: resolved.message.subject,
+      html: resolved.message.textHtml ?? "",
+      inReplyTo: headers["in-reply-to"],
+      references: headers.references,
+      messageId,
+      ...(attachments.length ? { attachments } : {}),
+    });
+    await client.messageDelete(String(resolved.uid), { uid: true });
+  }
+
+  private async buildDraftUploadTemplate(
+    resolved: ResolvedDraft,
+    attachments: MailAttachment[],
+  ): Promise<Buffer> {
+    const headers = resolved.message.headers;
+    const messageId = headers["message-id"];
+    if (!messageId) throw draftNotFoundError("attach to");
+    return buildDraftMime({
+      from: headers.from,
+      to: headers.to ?? "",
+      cc: headers.cc,
+      bcc: headers.bcc,
+      subject: resolved.message.subject,
+      html: resolved.message.textHtml ?? "",
+      inReplyTo: headers["in-reply-to"],
+      references: headers.references,
+      messageId,
+      attachments,
+    });
   }
 
   // --- Local mail sync (UID-based folder-delta) ---
@@ -2789,4 +2985,43 @@ export class ImapMessageNotFoundError extends Error {
     super(`Message ${messageId} not found`);
     this.name = "ImapMessageNotFoundError";
   }
+}
+
+// Split a MIME template with placeholder bytes into text parts and attachment
+// slots: the browser fills each slot with the file's base64 and uploads the
+// assembled message in chunks through the upload's PUT route.
+function templateToUploadStart(
+  template: Buffer,
+  slots: Array<{
+    part: DraftMessageUploadPart;
+    encoded: string;
+  }>,
+): DraftAttachmentUploadStart {
+  // The browser re-encodes the text parts, so a byte outside ASCII would
+  // change their length and break the declared upload size.
+  if (template.some((byte) => byte > 0x7f))
+    throw new Error("Could not prepare the draft upload.");
+  const message = template.toString("latin1");
+
+  // Inline images sit in a related part ahead of regular attachments, so the
+  // message order can differ from the slot order.
+  const located = slots
+    .map((slot) => ({ ...slot, index: message.indexOf(slot.encoded) }))
+    .sort((a, b) => a.index - b.index);
+  const parts: DraftMessageUploadPart[] = [];
+  let cursor = 0;
+  for (const { part, encoded, index } of located) {
+    if (index < 0 || index < cursor)
+      throw new Error("Could not prepare the draft upload.");
+    parts.push({ type: "text", text: message.slice(cursor, index) }, part);
+    cursor = index + encoded.length;
+  }
+  parts.push({ type: "text", text: message.slice(cursor) });
+
+  return {
+    type: "gmail-message",
+    sessionUri: `imap:draft-upload:${randomBytes(16).toString("hex")}`,
+    parts,
+    totalBytes: getDraftMessageUploadLength(parts),
+  };
 }

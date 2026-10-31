@@ -27,6 +27,8 @@ type FakeMessage = {
   inReplyTo?: string;
   references?: string;
   hasAttachment?: boolean;
+  /** Full MIME source the fake download yields instead of rawOf. */
+  raw?: string;
 };
 
 type FakeMailbox = {
@@ -374,6 +376,7 @@ function createFakeClient(
           messageId: header("Message-ID"),
           inReplyTo: header("In-Reply-To"),
           references: header("References"),
+          raw,
         });
         appended.push({ path, flags: flags ?? [] });
         return mailboxSupportsUidPlus ? { uid: nextUid } : undefined;
@@ -429,7 +432,7 @@ function createFakeClient(
           ? current.messages.find((item) => item.uid === Number(range))
           : current.messages[Number(range) - 1];
         const content = (async function* () {
-          if (pick) yield Buffer.from(rawOf(pick));
+          if (pick) yield Buffer.from(pick.raw ?? rawOf(pick));
         })();
         return { content };
       },
@@ -1165,29 +1168,30 @@ describe("ImapProvider stable draft ids", () => {
     ).resolves.toBeNull();
   });
 
-  it("throws a clear error instead of dropping attachments on update", async () => {
-    const fake = createFakeClient([
-      {
-        path: "Drafts",
-        specialUse: "\\Drafts",
-        messages: [
-          message(1, "2026-01-01", undefined, undefined, {
-            messageId: "<draft-with-file@example.com>",
-            subject: "with file",
-            html: "body",
-            hasAttachment: true,
-          }),
-        ],
-      },
-    ]);
+  it("updateDraft keeps attachments instead of dropping them", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
     connection.client = fake.client;
+    const provider = new ImapProvider(config);
+    const { id } = await provider.createDraft({
+      to: "friend@example.com",
+      subject: "with file",
+      messageHtml: "<p>body</p>",
+    });
+    await provider.addDraftAttachment(id, {
+      id: "file-1",
+      filename: "notes.txt",
+      mimeType: "text/plain",
+      size: 11,
+      disposition: "attachment",
+      content: Buffer.from("hello world"),
+    });
 
-    await expect(
-      new ImapProvider(config).updateDraft(
-        encodeImapDraftId("<draft-with-file@example.com>"),
-        { subject: "edited" },
-      ),
-    ).rejects.toThrow(/attachment/i);
+    await provider.updateDraft(id, { subject: "edited" });
+
+    const listed = await provider.getDraftAttachments(id);
+    expect(listed?.attachments.map((file) => file.filename)).toEqual([
+      "notes.txt",
+    ]);
     expect(mailboxesOf(fake).Drafts).toHaveLength(1);
   });
 
@@ -1341,6 +1345,150 @@ describe("ImapProvider stable draft ids", () => {
     expect(listed.map((draft) => draft.id)).toEqual([id]);
     await expect(provider.deleteDraft(listed[0].id)).resolves.toBe(true);
     expect(mailboxesOf(fake).Drafts).toHaveLength(0);
+  });
+
+  it("addDraftAttachment stores the file on the draft", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+    const provider = new ImapProvider(config);
+    const { id } = await provider.createDraft({
+      to: "friend@example.com",
+      subject: "with file",
+      messageHtml: "<p>body</p>",
+    });
+
+    const added = await provider.addDraftAttachment(id, {
+      id: "file-1",
+      filename: "notes.txt",
+      mimeType: "text/plain",
+      size: 11,
+      disposition: "attachment",
+      content: Buffer.from("hello world"),
+    });
+
+    expect(added.attachmentId).toBe("file-1");
+    expect(added.attachments).toHaveLength(1);
+    expect(added.attachments[0]).toMatchObject({
+      id: "file-1",
+      filename: "notes.txt",
+      mimeType: "text/plain",
+    });
+    const draft = await provider.getDraft(id);
+    expect(draft?.subject).toBe("with file");
+    expect(mailboxesOf(fake).Drafts).toHaveLength(1);
+  });
+
+  it("removeDraftAttachment drops only that file", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+    const provider = new ImapProvider(config);
+    const { id } = await provider.createDraft({
+      to: "friend@example.com",
+      subject: "two files",
+      messageHtml: "<p>body</p>",
+    });
+    await provider.addDraftAttachment(id, {
+      id: "file-1",
+      filename: "a.txt",
+      mimeType: "text/plain",
+      size: 1,
+      disposition: "attachment",
+      content: Buffer.from("a"),
+    });
+    await provider.addDraftAttachment(id, {
+      id: "file-2",
+      filename: "b.txt",
+      mimeType: "text/plain",
+      size: 1,
+      disposition: "attachment",
+      content: Buffer.from("b"),
+    });
+
+    const removed = await provider.removeDraftAttachment(id, "file-1");
+
+    expect(removed.attachments.map((file) => file.id)).toEqual(["file-2"]);
+    expect(mailboxesOf(fake).Drafts).toHaveLength(1);
+    await expect(provider.removeDraftAttachment(id, "file-1")).rejects.toThrow(
+      /no longer on the draft/,
+    );
+  });
+
+  it("sendDraft delivers attachments through SMTP", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+    const sent: Array<Record<string, unknown>> = [];
+    const sendSpy = vi
+      .spyOn(mailModule, "sendSmtpEmail")
+      .mockImplementation(async (_config, options) => {
+        sent.push(options as Record<string, unknown>);
+        return { messageId: "<smtp-sent@example.com>" };
+      });
+    try {
+      const provider = new ImapProvider(config);
+      const { id } = await provider.createDraft({
+        to: "friend@example.com",
+        subject: "send file",
+        messageHtml: "<p>body</p>",
+      });
+      await provider.addDraftAttachment(id, {
+        id: "file-1",
+        filename: "notes.txt",
+        mimeType: "text/plain",
+        size: 11,
+        disposition: "attachment",
+        content: Buffer.from("hello world"),
+      });
+
+      await provider.sendDraft(id);
+
+      const attachments = sent[0]?.attachments as Array<{
+        filename: string;
+        content: Buffer;
+      }>;
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0].filename).toBe("notes.txt");
+      expect(attachments[0].content.toString()).toBe("hello world");
+      expect(mailboxesOf(fake).Drafts).toHaveLength(0);
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("startDraftAttachmentUpload templates the whole message for chunking", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+    const provider = new ImapProvider(config);
+    const { id } = await provider.createDraft({
+      to: "friend@example.com",
+      subject: "big file",
+      messageHtml: "<p>body</p>",
+    });
+    await provider.addDraftAttachment(id, {
+      id: "file-1",
+      filename: "a.txt",
+      mimeType: "text/plain",
+      size: 1,
+      disposition: "attachment",
+      content: Buffer.from("a"),
+    });
+
+    const upload = await provider.startDraftAttachmentUpload(id, {
+      id: "file-2",
+      filename: "big.bin",
+      mimeType: "application/octet-stream",
+      size: 4 * 1024 * 1024,
+      disposition: "attachment",
+    });
+
+    expect(upload.type).toBe("gmail-message");
+    if (upload.type !== "gmail-message") return;
+    expect(upload.sessionUri.startsWith("imap:")).toBe(true);
+    const slots = upload.parts.filter((part) => part.type === "attachment");
+    expect(slots.map((slot) => slot.attachmentId).sort()).toEqual([
+      "file-1",
+      "file-2",
+    ]);
+    expect(upload.totalBytes).toBeGreaterThan(4 * 1024 * 1024);
   });
 });
 
