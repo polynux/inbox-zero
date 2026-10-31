@@ -667,6 +667,9 @@ export class ImapProvider implements EmailProvider {
       const archiveFolder = await findArchiveFolder(client);
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
+        // Gmail semantics: archiving removes the INBOX placement only. A
+        // Sent copy is not an inbox copy, so it stays in Sent.
+        if (folder !== "INBOX") continue;
         if (folder === archiveFolder) continue;
         await client.mailboxOpen(folder);
         try {
@@ -805,17 +808,23 @@ export class ImapProvider implements EmailProvider {
   }
 
   async markSpam(threadId: string): Promise<void> {
-    // Move to Junk/Spam folder
+    // Move to Junk/Spam folder. Only received mail is spam-reportable: the
+    // account's own Sent and Draft copies stay where they are.
     const messages = await this.getThreadMessages(threadId, {
       forMutation: true,
     });
     return this.withConnection(async (client) => {
       const junkFolder = await findJunkFolder(client);
       const targetFolder = junkFolder || "Junk";
+      const sentFolder = await findSentFolder(client);
+      const draftsFolder = await findDraftsFolder(client);
+      const skipped = new Set(
+        [sentFolder, draftsFolder].filter((folder) => folder !== null),
+      );
 
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
-        if (folder === targetFolder) continue;
+        if (folder === targetFolder || skipped.has(folder)) continue;
         await client.mailboxOpen(folder);
         await moveMessageToFolder(client, uid, targetFolder);
       }
@@ -1646,9 +1655,12 @@ ${messageContent}
       forMutation: true,
     });
     return this.withConnection(async (client) => {
+      const junkFolder = await findJunkFolder(client);
+      const spamFolder = junkFolder || "Junk";
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
-        if (folder === "INBOX") continue;
+        // Not-spam returns spam mail to INBOX; copies elsewhere keep theirs.
+        if (folder !== spamFolder) continue;
         await client.mailboxOpen(folder);
         await moveMessageToFolder(client, uid, "INBOX");
       }
@@ -1660,9 +1672,12 @@ ${messageContent}
       forMutation: true,
     });
     return this.withConnection(async (client) => {
+      const archiveFolder = await findArchiveFolder(client);
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
-        if (folder === "INBOX") continue;
+        // Unarchiving returns archived mail to INBOX; anything elsewhere
+        // (notably Sent) keeps its placement.
+        if (folder !== archiveFolder) continue;
         await client.mailboxOpen(folder);
         await moveMessageToFolder(client, uid, "INBOX");
       }
@@ -1677,11 +1692,20 @@ ${messageContent}
       forMutation: true,
     });
     return this.withConnection(async (client) => {
+      const trashFolder = await findTrashFolder(client);
+      if (!trashFolder) return;
+      const sentFolder = await findSentFolder(client);
+      const ownAddress = this.config.email.toLowerCase();
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
-        if (folder === "INBOX") continue;
+        // Only trashed copies move back. A copy the account sent restores to
+        // Sent; received mail restores to INBOX.
+        if (folder !== trashFolder) continue;
+        const from = extractEmailAddress(msg.headers.from).toLowerCase();
+        const target =
+          sentFolder && from !== "" && from === ownAddress ? sentFolder : "INBOX";
         await client.mailboxOpen(folder);
-        await moveMessageToFolder(client, uid, "INBOX");
+        await moveMessageToFolder(client, uid, target);
       }
     });
   }

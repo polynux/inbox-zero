@@ -2308,6 +2308,187 @@ describe("ImapProvider thread id agreement across listing, getMessage and thread
     expect(mailboxesOf(fake)["All Mail"]).toHaveLength(3);
   });
 
+  // Gmail semantics: archiving removes the INBOX placement only. The Sent
+  // copy never leaves Sent; restoring moves only the archived copy back.
+  it("archiveThread moves only the INBOX member of an INBOX+Sent thread", async () => {
+    const root = "<sent-copy@x>";
+    const threadId = buildThreadId(undefined, undefined, root);
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", "me@example.com", {
+            messageId: root,
+          }),
+        ],
+      },
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [
+          message(2, "2026-01-01", "me@example.com", "alice@x", {
+            messageId: "<sent@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+        ],
+      },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+    ]);
+    connection.client = fake.client;
+
+    await new ImapProvider(config).archiveThread(threadId, "me@example.com");
+
+    expect(mailboxesOf(fake).INBOX).toEqual([]);
+    expect(mailboxesOf(fake).Archive).toHaveLength(1);
+    expect(mailboxesOf(fake).Sent).toHaveLength(1);
+  });
+
+  it("unarchiveThread moves only the Archive member back to INBOX", async () => {
+    const root = "<archived@x>";
+    const threadId = buildThreadId(undefined, undefined, root);
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [] },
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [
+          message(2, "2026-01-01", "me@example.com", "alice@x", {
+            messageId: "<sent@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+        ],
+      },
+      {
+        path: "Archive",
+        specialUse: "\\Archive",
+        messages: [
+          message(7, "2026-01-01", "alice@x", "me@example.com", {
+            messageId: root,
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    await new ImapProvider(config).unarchiveThread(threadId);
+
+    expect(mailboxesOf(fake).Archive).toEqual([]);
+    expect(mailboxesOf(fake).INBOX).toHaveLength(1);
+    expect(mailboxesOf(fake).Sent).toHaveLength(1);
+  });
+
+  it("markSpam moves only received members, never Sent or Drafts", async () => {
+    const root = "<spam-target@x>";
+    const threadId = buildThreadId(undefined, undefined, root);
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", "me@example.com", {
+            messageId: root,
+          }),
+        ],
+      },
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [
+          message(2, "2026-01-01", "me@example.com", "alice@x", {
+            messageId: "<sent@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+        ],
+      },
+      {
+        path: "Drafts",
+        specialUse: "\\Drafts",
+        messages: [
+          message(3, "2026-01-01", "me@example.com", "alice@x", {
+            messageId: "<draft@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+        ],
+      },
+      { path: "Junk", specialUse: "\\Junk", messages: [] },
+    ]);
+    connection.client = fake.client;
+
+    await new ImapProvider(config).markSpam(threadId);
+
+    expect(mailboxesOf(fake).INBOX).toEqual([]);
+    expect(mailboxesOf(fake).Junk).toHaveLength(1);
+    expect(mailboxesOf(fake).Sent).toHaveLength(1);
+    expect(mailboxesOf(fake).Drafts).toHaveLength(1);
+  });
+
+  it("markNotSpam moves only Spam members back to INBOX", async () => {
+    const root = "<not-spam@x>";
+    const threadId = buildThreadId(undefined, undefined, root);
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [] },
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [
+          message(2, "2026-01-01", "me@example.com", "alice@x", {
+            messageId: "<sent@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+        ],
+      },
+      {
+        path: "Junk",
+        specialUse: "\\Junk",
+        messages: [
+          message(9, "2026-01-01", "alice@x", "me@example.com", {
+            messageId: root,
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    await new ImapProvider(config).markNotSpam(threadId);
+
+    expect(mailboxesOf(fake).Junk).toEqual([]);
+    expect(mailboxesOf(fake).INBOX).toHaveLength(1);
+    expect(mailboxesOf(fake).Sent).toHaveLength(1);
+  });
+
+  it("untrashThread restores the sent copy to Sent and received mail to INBOX", async () => {
+    const root = "<trashed-thread@x>";
+    const threadId = buildThreadId(undefined, undefined, root);
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [] },
+      { path: "Sent", specialUse: "\\Sent", messages: [] },
+      {
+        path: "Trash",
+        specialUse: "\\Trash",
+        messages: [
+          message(5, "2026-01-01", "me@example.com", "alice@x", {
+            messageId: "<sent@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+          message(6, "2026-01-01", "alice@x", "me@example.com", {
+            messageId: root,
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    await new ImapProvider(config).untrashThread(threadId);
+
+    expect(mailboxesOf(fake).Trash).toEqual([]);
+    expect(mailboxesOf(fake).Sent.map((m) => m.uid)).toEqual([5]);
+    expect(mailboxesOf(fake).INBOX.map((m) => m.uid)).toEqual([6]);
+  });
   it("a non-Proton server with a user folder named All Mail still fans out to INBOX", async () => {
     const fake = createFakeClient([
       {
