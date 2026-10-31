@@ -1,5 +1,6 @@
 import { ImapFlow } from "imapflow";
 import { env } from "@/env";
+import { assertImapHostAllowed } from "@/utils/imap/host-validation";
 import { shouldBypassTlsVerification } from "@/utils/imap/tls";
 import type { ImapCredentialConfig } from "@/utils/imap/types";
 import { createScopedLogger } from "@/utils/logger";
@@ -37,6 +38,12 @@ export async function withImapConnection<T>(
   config: ImapCredentialConfig,
   fn: (client: ImapFlow) => Promise<T>,
 ): Promise<T> {
+  // The host was validated when the account was linked, but DNS is re-resolved
+  // on every connection so a rebound record cannot reach a private address.
+  await assertImapHostAllowed(config.imapHost, {
+    allowPrivateHosts: env.IMAP_ALLOW_PRIVATE_HOSTS,
+  });
+
   const client = createImapConnection(config);
   let connectTimer: ReturnType<typeof setTimeout> | undefined;
 

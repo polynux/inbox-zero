@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveHostAddresses } from "@inboxzero/network/pinned-dns";
-import { validateImapHosts } from "@/utils/imap/host-validation";
+import {
+  assertImapHostAllowed,
+  validateImapHosts,
+} from "@/utils/imap/host-validation";
 
 vi.mock("@inboxzero/network/pinned-dns", async (importOriginal) => {
   const actual =
@@ -147,5 +150,27 @@ describe("validateImapHosts", () => {
         await validateImapHosts(["bridge.lan"], { allowPrivateHosts: true }),
       ).toEqual(blocked);
     });
+  });
+});
+
+describe("assertImapHostAllowed", () => {
+  beforeEach(() => {
+    vi.mocked(resolveHostAddresses).mockReset();
+  });
+
+  it("resolves when the stored host still validates", async () => {
+    resolvesTo("66.111.4.1");
+
+    await expect(
+      assertImapHostAllowed("imap.fastmail.com", { allowPrivateHosts: false }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("throws when the stored host now resolves to a private address", async () => {
+    resolvesTo("10.0.0.5");
+
+    await expect(
+      assertImapHostAllowed("imap.fastmail.com", { allowPrivateHosts: false }),
+    ).rejects.toThrow("Host is not allowed");
   });
 });

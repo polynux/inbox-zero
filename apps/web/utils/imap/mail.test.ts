@@ -8,7 +8,12 @@ const createTransport = vi.hoisted(() =>
 );
 vi.mock("nodemailer", () => ({ default: { createTransport } }));
 
-import { testSmtpConnection } from "@/utils/imap/mail";
+const validateHost = vi.hoisted(() => vi.fn(async () => ({ valid: true })));
+vi.mock("@/utils/imap/host-validation", () => ({
+  assertImapHostAllowed: validateHost,
+}));
+
+import { sendSmtpEmail, testSmtpConnection } from "@/utils/imap/mail";
 
 function baseConfig(overrides: Record<string, unknown> = {}) {
   return {
@@ -29,6 +34,30 @@ function baseConfig(overrides: Record<string, unknown> = {}) {
 describe("testSmtpConnection", () => {
   beforeEach(() => {
     createTransport.mockClear();
+    validateHost.mockClear();
+    validateHost.mockResolvedValue({ valid: true });
+  });
+
+  it("re-validates the stored SMTP host before connecting", async () => {
+    await testSmtpConnection(baseConfig());
+
+    expect(validateHost).toHaveBeenCalledWith(
+      "127.0.0.1",
+      expect.objectContaining({ allowPrivateHosts: false }),
+    );
+  });
+
+  it("refuses to send when the stored SMTP host no longer validates", async () => {
+    validateHost.mockRejectedValue(new Error("Host is not allowed") as never);
+
+    await expect(
+      sendSmtpEmail(baseConfig(), {
+        to: "you@example.com",
+        subject: "Hi",
+        text: "Hello",
+      }),
+    ).rejects.toThrow("Host is not allowed");
+    expect(createTransport).not.toHaveBeenCalled();
   });
 
   it("requires STARTTLS when the SMTP security is starttls", async () => {

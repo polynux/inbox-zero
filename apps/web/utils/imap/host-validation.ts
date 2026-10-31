@@ -4,6 +4,7 @@ import {
   normalizeHostname,
 } from "@inboxzero/network/host-policy";
 import { resolveHostAddresses } from "@inboxzero/network/pinned-dns";
+import { SafeError } from "@/utils/error";
 
 type ImapHostValidationResult =
   | { valid: true }
@@ -37,6 +38,19 @@ export async function validateImapHosts(
   }
 
   return { valid: true };
+}
+
+/**
+ * Re-checks a stored host immediately before use. Linking validates the host
+ * once, but DNS can be re-pointed afterwards (rebinding), so every connection
+ * resolves and checks again instead of trusting the earlier result.
+ */
+export async function assertImapHostAllowed(
+  host: string,
+  { allowPrivateHosts }: { allowPrivateHosts: boolean },
+): Promise<void> {
+  const result = await validateImapHost(host, { allowPrivateHosts });
+  if (!result.valid) throw new SafeError(result.error);
 }
 
 async function validateImapHost(

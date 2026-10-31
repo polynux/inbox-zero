@@ -1,6 +1,7 @@
 import nodemailer from "nodemailer";
 import type { Attachment as MailAttachment } from "nodemailer/lib/mailer";
 import { env } from "@/env";
+import { assertImapHostAllowed } from "@/utils/imap/host-validation";
 import { shouldBypassTlsVerification } from "@/utils/imap/tls";
 import type { ImapCredentialConfig } from "@/utils/imap/types";
 import { createScopedLogger } from "@/utils/logger";
@@ -45,6 +46,12 @@ export async function sendSmtpEmail(
     attachments?: MailAttachment[];
   },
 ): Promise<{ messageId: string }> {
+  // Re-check the stored SMTP host on every send: DNS could have been rebound
+  // since the account was linked.
+  await assertImapHostAllowed(config.smtpHost, {
+    allowPrivateHosts: env.IMAP_ALLOW_PRIVATE_HOSTS,
+  });
+
   const transport = createSmtpTransport(config);
   try {
     const result = await transport.sendMail({
@@ -78,6 +85,10 @@ export async function sendSmtpEmail(
 export async function testSmtpConnection(
   config: ImapCredentialConfig,
 ): Promise<boolean> {
+  await assertImapHostAllowed(config.smtpHost, {
+    allowPrivateHosts: env.IMAP_ALLOW_PRIVATE_HOSTS,
+  });
+
   const transport = createSmtpTransport(config);
 
   try {

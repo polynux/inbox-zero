@@ -8,6 +8,11 @@ const ImapFlowMock = vi.hoisted(() => vi.fn());
 
 vi.mock("imapflow", () => ({ ImapFlow: ImapFlowMock }));
 
+const validateHost = vi.hoisted(() => vi.fn(async () => ({ valid: true })));
+vi.mock("@/utils/imap/host-validation", () => ({
+  assertImapHostAllowed: validateHost,
+}));
+
 import { createImapConnection, withImapConnection } from "@/utils/imap/client";
 
 function baseConfig(overrides: Record<string, unknown> = {}) {
@@ -106,7 +111,36 @@ describe("withImapConnection", () => {
 
   beforeEach(() => {
     ImapFlowMock.mockClear();
+    validateHost.mockClear();
+    validateHost.mockResolvedValue({ valid: true });
+    mockEnv.IMAP_ALLOW_PRIVATE_HOSTS = false;
     vi.useRealTimers();
+  });
+
+  it("re-validates the stored host before connecting", async () => {
+    const client = mockClient();
+
+    await withImapConnection(baseConfig(), async () => {});
+
+    expect(validateHost).toHaveBeenCalledWith(
+      "127.0.0.1",
+      expect.objectContaining({ allowPrivateHosts: false }),
+    );
+    expect(client.connect).toHaveBeenCalledOnce();
+  });
+
+  it("refuses to connect when the host no longer validates", async () => {
+    const client = mockClient();
+    const { SafeError } = await import("@/utils/error");
+    validateHost.mockRejectedValue(
+      new SafeError("Host is not allowed") as never,
+    );
+
+    await expect(
+      withImapConnection(baseConfig(), async () => {}),
+    ).rejects.toThrow("Host is not allowed");
+
+    expect(client.connect).not.toHaveBeenCalled();
   });
 
   it("leaves no connect timeout pending after a successful call", async () => {
