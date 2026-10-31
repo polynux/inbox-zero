@@ -1825,19 +1825,18 @@ ${messageContent}
 /**
  * Mailboxes a whole-account IMAP search should cover.
  * A flagged `\All` mailbox (Gmail) is canonical: reads and mutations both
- * use it. Bridge's unflagged "All Mail" is a view, so it serves read-only
- * lookups only, and only on the full Bridge layout (top-level `Folders`,
- * `Labels`, `All Mail`, no `\All` anywhere) — a stray user folder named
- * `All Mail` never narrows a search. Otherwise fan out over every
- * selectable real mailbox, skipping views whose messages also live in a
- * real folder (Labels mailboxes, Starred/Flagged, All Mail) so the same
- * message is not returned twice. Mutation callers (archive, trash,
- * restore, move, mark, star) pass `forMutation: true`: on Bridge layouts
- * the members then resolve in their real folders, so each member's own
- * mailbox is opened exactly once and views are never mutated. Message ids
- * in thread results then point at real folders. Trash and Junk are
- * excluded by default (listing/search scope) but included for thread
- * resolution, so untrash/markNotSpam can find threads living only there.
+ * use it. On the Bridge layout (top-level `Folders`, `Labels`, `All Mail`,
+ * no `\All` anywhere) "All Mail" is a view, so every path — reads and
+ * mutations alike — fans out over real folders (INBOX, Archive, Sent,
+ * Drafts, Spam, Trash, `Folders/*`), skipping views (`All Mail`,
+ * `Labels/*`, `Starred`, `\Noselect`, the `Folders`/`Labels` containers)
+ * never point into a view. A stray user folder named `All Mail` on another
+ * server never narrows a search. Otherwise fan out over every selectable
+ * real mailbox, skipping views whose messages also live in a real folder.
+ * Mutation callers (archive, trash, restore, move, mark, star) pass
+ * `forMutation: true`; Trash and Junk scoping stays as before: excluded by
+ * default (listing/search scope) but included for thread resolution, so
+ * untrash/markNotSpam can find threads living only there.
  */
 async function resolveSearchFolders(
   client: ImapFlow,
@@ -1847,43 +1846,29 @@ async function resolveSearchFolders(
 
   const allMail = findAllMailInList(mailboxes);
   const flaggedAll = mailboxes.some((mb) => mb.specialUse === "\\All");
-  const useAllMail =
-    allMail &&
-    (flaggedAll ||
-      (!options?.forMutation && isProtonBridgeLayoutInList(mailboxes)));
-  if (useAllMail) {
-    if (!options?.includeTrashAndJunk) return [allMail];
-    const trashAndJunk = mailboxes
-      .filter(
-        (mb) =>
-          (mb.specialUse === "\\Trash" || mb.specialUse === "\\Junk") &&
-          mb.path !== allMail,
-      )
-      .map((mb) => mb.path);
-    return [allMail, ...trashAndJunk];
-  }
+  if (allMail && flaggedAll) return [allMail];
+  const onBridge = !flaggedAll && isProtonBridgeLayoutInList(mailboxes);
 
   const skippedSpecialUse = new Set(
     options?.includeTrashAndJunk
       ? ["\\Drafts", "\\Flagged"]
       : ["\\Trash", "\\Junk", "\\Drafts", "\\Flagged"],
   );
+  const viewPaths = (path: string) =>
+    path === "Labels" ||
+    path.startsWith("Labels/") ||
+    path === "Starred" ||
+    path === "All Mail" ||
+    path.endsWith("/All Mail") ||
+    (onBridge && (path === "Folders" || path === "Labels"));
   const paths = mailboxes
-    .filter((mb) => mb.listed && !mb.flags.has("\\Noselect"))
+    .filter((mb) => !mb.flags.has("\\Noselect"))
+    .filter((mb) => mb.listed || onBridge)
     .filter((mb) => !mb.specialUse || !skippedSpecialUse.has(mb.specialUse))
-    .filter((mb) => !isViewMailbox(mb.path))
+    .filter((mb) => !viewPaths(mb.path))
     .map((mb) => mb.path);
 
   return paths.length > 0 ? paths : ["INBOX"];
-}
-
-// Proton view mailboxes whose messages also live in a real folder. Fanning
-// out over them returns every labeled or starred message twice.
-function isViewMailbox(path: string): boolean {
-  if (path === "Labels" || path.startsWith("Labels/")) return true;
-  if (path === "Starred") return true;
-  if (path === "All Mail" || path.endsWith("/All Mail")) return true;
-  return false;
 }
 
 /**
