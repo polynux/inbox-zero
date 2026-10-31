@@ -1,7 +1,9 @@
 # Proton Mail Bridge for local IMAP testing. See docs/IMAP_PROTON.md.
 #
-# shenxn/protonmail-bridge packages the official Bridge .deb and tracks
-# upstream releases. Pin the tag so a Bridge upgrade is a deliberate change.
+# Builds Bridge from the official ProtonMail/proton-bridge source (see
+# Dockerfile). shenxn/protonmail-bridge's Docker Hub images stopped at 3.19.0,
+# so build locally instead of trusting a third-party prebuilt image with your
+# Proton login. Bump BRIDGE_VERSION (a proton-bridge tag) to upgrade.
 #
 # One-time login (interactive, handles 2FA):
 #   docker compose -f docker/proton-bridge/docker-compose.yml run --rm proton-bridge init
@@ -10,7 +12,11 @@
 #   docker compose -f docker/proton-bridge/docker-compose.yml up -d
 services:
   proton-bridge:
-    image: shenxn/protonmail-bridge:3.27.1
+    build:
+      context: .
+      args:
+        BRIDGE_VERSION: v3.27.1
+    image: inbox-zero/proton-bridge:v3.27.1
     restart: unless-stopped
     ports:
       # Loopback only, like the desktop Bridge. SMTP is on 1026 because

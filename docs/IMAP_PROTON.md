@@ -74,14 +74,21 @@ host, since the password would cross the network in the clear.
 
 ## Running Bridge in Docker
 
-`docker/proton-bridge/docker-compose.yml` runs
-[`shenxn/protonmail-bridge`](https://github.com/shenxn/protonmail-bridge-docker),
-which packages the official Bridge `.deb` and tracks upstream releases (pinned
-to `3.27.1`, the latest Bridge release). Ports are bound to loopback only:
-IMAP `127.0.0.1:1143`, SMTP `127.0.0.1:1026` (not 1025, which Mailpit
-commonly holds).
+`docker/proton-bridge/docker-compose.yml` builds Bridge `v3.27.1` (the latest
+release) from the official
+[ProtonMail/proton-bridge](https://github.com/ProtonMail/proton-bridge) source
+with `docker/proton-bridge/Dockerfile`, adapted from
+[`shenxn/protonmail-bridge-docker`](https://github.com/shenxn/protonmail-bridge-docker)
+(entrypoint vendored from commit `5874fde`). That recipe no longer builds
+current Bridge (missing `libfido2`), which is also why its Docker Hub images
+stopped at 3.19.0; the fork's Dockerfile adds the FIDO2/CBOR/OpenSSL deps.
+Building locally also keeps a third-party prebuilt image away from your Proton
+login. The first build compiles Go and takes a few minutes.
+Ports are bound to loopback only: IMAP `127.0.0.1:1143`, SMTP
+`127.0.0.1:1026` (not 1025, which Mailpit commonly holds).
 
 ```sh
+docker compose -f docker/proton-bridge/docker-compose.yml build
 # one-time, interactive (supports 2FA)
 docker compose -f docker/proton-bridge/docker-compose.yml run --rm proton-bridge init
 #   bridge> login      # Proton credentials + 2FA
