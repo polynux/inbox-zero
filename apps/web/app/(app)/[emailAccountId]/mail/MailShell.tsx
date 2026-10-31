@@ -847,7 +847,12 @@ export function MailShell() {
       autoAdvanceReader = false,
     ) => {
       const ids = actionTargets.map((target) => target.key);
-      if (!ids.length) return;
+      if (!ids.length) {
+        // The row the action targeted is gone (stale selection, list
+        // refreshed mid-click): say so instead of silently doing nothing.
+        toast.error("That conversation is no longer in the list.");
+        return;
+      }
       const hadSelection = selection.hasSelection;
       const removedOpenThreadKey =
         removeFromList && openThreadKey && ids.includes(openThreadKey)
@@ -877,7 +882,7 @@ export function MailShell() {
         setFocusedIndex(focusedIndex);
         setOpenThread(openThreadSelection);
       }
-      if (!queuedThreadKeys.length && !hadSelection) return;
+      if (!queuedThreadKeys.length) return;
       if (
         queuedOpenThread &&
         !autoAdvanceReader &&
