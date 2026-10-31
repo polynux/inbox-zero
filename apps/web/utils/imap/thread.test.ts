@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { encodeImapMessageId } from "@/utils/imap/message-id";
 import {
   buildThreadId,
-  getAllThreadMessageIds,
   getRootMessageId,
   parseFallbackThreadId,
   parseMessageIdList,
@@ -188,33 +187,5 @@ describe("buildThreadId", () => {
     expect(() => parseThreadRootMessageId(shortRoot)).toThrow(/implausible/);
     const noAt = `t.${Buffer.from("no-at-sign-here", "utf8").toString("base64url")}`;
     expect(() => parseThreadRootMessageId(noAt)).toThrow(/implausible/);
-  });
-});
-
-describe("getAllThreadMessageIds", () => {
-  it("collects all unique message IDs from headers", () => {
-    const ids = getAllThreadMessageIds(
-      "<a@ex.com> <b@ex.com>",
-      "<b@ex.com>",
-      "<c@ex.com>",
-    );
-    expect(ids).toContain("a@ex.com");
-    expect(ids).toContain("b@ex.com");
-    expect(ids).toContain("c@ex.com");
-    expect(ids).toHaveLength(3);
-  });
-
-  it("deduplicates IDs across headers", () => {
-    const ids = getAllThreadMessageIds(
-      "<same@ex.com>",
-      "<same@ex.com>",
-      "<same@ex.com>",
-    );
-    expect(ids).toHaveLength(1);
-  });
-
-  it("returns empty array when all headers are missing", () => {
-    const ids = getAllThreadMessageIds(undefined, undefined, undefined);
-    expect(ids).toHaveLength(0);
   });
 });

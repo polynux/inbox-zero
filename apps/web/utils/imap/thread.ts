@@ -120,36 +120,6 @@ export function parseMessageIdList(header: string): string[] {
 }
 
 /**
- * Extract all Message-IDs in a thread's reference chain,
- * useful for searching related messages.
- */
-export function getAllThreadMessageIds(
-  references: string | undefined,
-  inReplyTo: string | undefined,
-  messageId: string | undefined,
-): string[] {
-  const ids = new Set<string>();
-
-  if (references) {
-    for (const id of parseMessageIdList(references)) {
-      ids.add(id);
-    }
-  }
-
-  if (inReplyTo) {
-    for (const id of parseMessageIdList(inReplyTo)) {
-      ids.add(id);
-    }
-  }
-
-  if (messageId) {
-    ids.add(messageId.replace(/^<|>$/g, ""));
-  }
-
-  return [...ids];
-}
-
-/**
  * Recover the folder-qualified listing key carried by a header-less thread
  * id. Returns null for header-derived (hashed) thread ids. Rejects malformed
  * keys so callers never fetch or act on a fabricated folder.
