@@ -174,6 +174,49 @@ describe("/api/user/drafts/[draftId]/attachments/uploads/[uploadId]", () => {
     expect(response.status).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("accumulates IMAP chunks and completes the draft on the last one", async () => {
+    const completeDraftAttachmentUpload = vi.fn().mockResolvedValue(undefined);
+    createEmailProvider.mockResolvedValue({
+      ...provider,
+      completeDraftAttachmentUpload,
+    });
+    await saveDraftAttachmentUpload("account-1", UPLOAD_ID, {
+      draftId: "r-1",
+      attachmentId: "file-1",
+      sessionUri: "imap:draft-upload:abc123",
+      totalBytes: TOTAL_BYTES,
+      nextOffset: 0,
+    });
+    const first = await putChunk({
+      start: 0,
+      length: GMAIL_UPLOAD_CHUNK_BYTES,
+    });
+    await expect(first.json()).resolves.toEqual({
+      status: "incomplete",
+      nextOffset: GMAIL_UPLOAD_CHUNK_BYTES,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(completeDraftAttachmentUpload).not.toHaveBeenCalled();
+
+    const last = await putChunk({
+      start: GMAIL_UPLOAD_CHUNK_BYTES,
+      length: 10,
+    });
+    await expect(last.json()).resolves.toEqual({
+      status: "complete",
+      attachmentId: "file-1",
+      messageId: "message-2",
+      attachments: [],
+    });
+    expect(completeDraftAttachmentUpload).toHaveBeenCalledWith(
+      "r-1",
+      expect.any(Buffer),
+    );
+    expect(completeDraftAttachmentUpload.mock.calls[0]?.[1].byteLength).toBe(
+      TOTAL_BYTES,
+    );
+  });
 });
 
 function putChunk({

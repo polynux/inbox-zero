@@ -207,6 +207,15 @@ export interface EmailProvider {
     emailAccountId: string,
   ): Promise<void>;
   checkIfReplySent(senderEmail: string): Promise<boolean>;
+  /**
+   * Replaces the draft with an assembled MIME message the chunk route
+   * collected. Gmail never needs it (its session URI completes server-side);
+   * IMAP implements it because it has no resumable-upload endpoint.
+   */
+  completeDraftAttachmentUpload?(
+    draftId: string,
+    message: Buffer,
+  ): Promise<void>;
   /** Exact message count, including drafts. Folder and label scopes intersect. */
   countMessages(options: {
     folderId?: string;

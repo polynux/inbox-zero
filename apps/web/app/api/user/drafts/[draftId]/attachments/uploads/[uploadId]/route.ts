@@ -5,14 +5,16 @@ import {
   parseContentRange,
   validateGmailUploadChunk,
 } from "@/utils/email/draft-attachment-upload";
-import type { DraftAttachmentsResult } from "@/utils/email/types";
+import type { EmailProvider } from "@/utils/email/types";
 import { SafeError } from "@/utils/error";
 import { uploadGmailDraftChunk } from "@/utils/gmail/resumable-draft-upload";
 import { withEmailProvider } from "@/utils/middleware";
 import {
+  appendDraftAttachmentUploadChunk,
   deleteDraftAttachmentUpload,
   getDraftAttachmentUpload,
   saveDraftAttachmentUpload,
+  takeDraftAttachmentUploadChunks,
 } from "@/utils/redis/draft-attachment-upload";
 import { readRequestBytes } from "@/utils/request-body";
 
@@ -28,9 +30,10 @@ const paramsSchema = z.object({
 });
 
 /**
- * Forwards one chunk of a Gmail draft upload. The session URI and the token
- * stay here; the browser only ever names the upload it was given, and the
- * key includes the account so another account's upload id finds nothing.
+ * Forwards one chunk of a Gmail draft upload, or accumulates one chunk of
+ * an IMAP draft upload until the last one arrives. The session URI and the
+ * token stay here; the browser only ever names the upload it was given, and
+ * the key includes the account so another account's upload id finds nothing.
  */
 export const PUT = withEmailProvider(
   "user/drafts/attachments/upload-chunk",
@@ -56,6 +59,39 @@ export const PUT = withEmailProvider(
     if (!bytes || bytes.byteLength !== range.length)
       throw new SafeError("Upload chunk does not match its range.");
 
+    // IMAP uploads have no provider session: the session URI is ours, and
+    // chunks accumulate server-side until the last one completes the draft.
+    if (upload.sessionUri.startsWith("imap:draft-upload:")) {
+      if (!request.emailProvider.completeDraftAttachmentUpload)
+        throw new SafeError("This upload expired. Attach the file again.", 404);
+      await appendDraftAttachmentUploadChunk(
+        emailAccountId,
+        uploadId,
+        Buffer.from(bytes).toString("base64"),
+      );
+      const nextOffset = range.start + range.length;
+      if (nextOffset < upload.totalBytes) {
+        await saveDraftAttachmentUpload(emailAccountId, uploadId, {
+          ...upload,
+          nextOffset,
+        });
+        return NextResponse.json({
+          status: "incomplete",
+          nextOffset,
+        } satisfies UploadDraftMessageChunkResponse);
+      }
+      const chunks = await takeDraftAttachmentUploadChunks(
+        emailAccountId,
+        uploadId,
+      );
+      await request.emailProvider.completeDraftAttachmentUpload(
+        draftId,
+        Buffer.concat(chunks.map((chunk) => Buffer.from(chunk, "base64"))),
+      );
+      await deleteDraftAttachmentUpload(emailAccountId, uploadId);
+      return completeUploadResponse(request.emailProvider, draftId, upload);
+    }
+
     const result = await uploadGmailDraftChunk({
       accessToken: request.emailProvider.getAccessToken(),
       sessionUri: upload.sessionUri,
@@ -75,17 +111,24 @@ export const PUT = withEmailProvider(
     }
 
     await deleteDraftAttachmentUpload(emailAccountId, uploadId);
-    const attachments =
-      await request.emailProvider.getDraftAttachments(draftId);
-    if (!attachments)
-      throw new SafeError(
-        "This draft is no longer available. Check Sent before trying again.",
-        404,
-      );
-    return NextResponse.json({
-      status: "complete",
-      attachmentId: upload.attachmentId,
-      ...attachments,
-    } satisfies UploadDraftMessageChunkResponse);
+    return completeUploadResponse(request.emailProvider, draftId, upload);
   },
 );
+
+async function completeUploadResponse(
+  emailProvider: EmailProvider,
+  draftId: string,
+  upload: { attachmentId: string },
+) {
+  const attachments = await emailProvider.getDraftAttachments(draftId);
+  if (!attachments)
+    throw new SafeError(
+      "This draft is no longer available. Check Sent before trying again.",
+      404,
+    );
+  return NextResponse.json({
+    status: "complete",
+    attachmentId: upload.attachmentId,
+    ...attachments,
+  } satisfies UploadDraftMessageChunkResponse);
+}

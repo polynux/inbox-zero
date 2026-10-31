@@ -1463,6 +1463,9 @@ ${messageContent}
           ? { attachments: parts.map((part) => toDraftMailAttachment(part)) }
           : {}),
       });
+      // readDraftParts leaves Drafts open read-only; reopen it writable —
+      // EXPUNGE-on-\Deleted needs a read-write SELECT.
+      await client.mailboxOpen(resolved.folder);
       await client.messageDelete(String(resolved.uid), { uid: true });
     });
   }
@@ -1503,6 +1506,9 @@ ${messageContent}
           ? { attachments: parts.map((part) => toDraftMailAttachment(part)) }
           : {}),
       });
+      // readDraftParts leaves Drafts open read-only; reopen it writable —
+      // EXPUNGE-on-\Deleted needs a read-write SELECT.
+      await client.mailboxOpen(resolved.folder);
       await client.messageDelete(String(resolved.uid), { uid: true });
       return {
         messageId,
@@ -2105,10 +2111,11 @@ ${messageContent}
     });
   }
 
-  // Attachment ids are MIME part ids from bodyStructure. Open the mailbox
-  // named by the folder-qualified message id, verify the part exists, then
-  // download it — a legitimately empty part returns empty bytes, while an
-  // absent part throws.
+  // Attachment ids are MIME part ids from bodyStructure. Draft files are
+  // named by their stable X-Attachment-Id instead, so resolve those against
+  // the draft's parsed MIME. Open the mailbox named by the folder-qualified
+  // message id, verify the part exists, then download it — a legitimately
+  // empty part returns empty bytes, while an absent part throws.
   private async downloadAttachmentPart(
     messageId: string,
     attachmentId: string,
@@ -2125,10 +2132,24 @@ ${messageContent}
         { bodyStructure: true },
         { uid: true },
       );
-      if (!findBodyPart(listed?.bodyStructure, attachmentId))
+      if (!findBodyPart(listed?.bodyStructure, attachmentId)) {
+        // Draft files carry stable X-Attachment-Id names, not MIME part ids:
+        // resolve those against the draft's parsed MIME.
+        const draftId = await this.getDraftReferenceForMessage(messageId);
+        if (draftId) {
+          const draft = await resolveDraftUid(client, draftId.id, {
+            readOnly: true,
+          });
+          if (draft) {
+            const parts = await this.readDraftParts(client, draft);
+            const match = parts.find((part) => part.id === attachmentId);
+            if (match) return match.content;
+          }
+        }
         throw new SafeError(
           `Attachment part ${attachmentId} not found on message ${messageId}`,
         );
+      }
       const downloaded = await client.download(String(uid), attachmentId, {
         uid: true,
       });
@@ -2306,9 +2327,39 @@ ${messageContent}
     });
   }
 
+  // Completes a chunked upload: the chunk route assembled the templated MIME
+  // with the real file bytes, so APPEND it under the draft's Message-ID and
+  // expunge the old copy — the same replace the direct path performs.
+  async completeDraftAttachmentUpload(
+    draftId: string,
+    message: Buffer,
+  ): Promise<void> {
+    return this.withConnection(async (client) => {
+      const resolved = await this.requireDraftForAttachment(client, draftId);
+      const messageId = resolved.message.headers["message-id"];
+      if (!messageId) throw draftNotFoundError("attach to");
+      const parsed = await readDraftAttachmentParts(message);
+      if (!parsed.length)
+        throw new SafeError("This upload expired. Attach the file again.");
+      await appendDraftMessage(client, resolved.folder, {
+        from: resolved.message.headers.from,
+        to: resolved.message.headers.to ?? "",
+        cc: resolved.message.headers.cc,
+        bcc: resolved.message.headers.bcc,
+        subject: resolved.message.subject,
+        html: resolved.message.textHtml ?? "",
+        inReplyTo: resolved.message.headers["in-reply-to"],
+        references: resolved.message.headers.references,
+        messageId,
+        attachments: parsed.map((part) => toDraftMailAttachment(part)),
+      });
+      await client.mailboxOpen(resolved.folder);
+      await client.messageDelete(String(resolved.uid), { uid: true });
+    });
+  }
+
   // Reads a draft's files from its raw MIME: APPEND keeps no attachment
-  // metadata, so the source is the only store. The Drafts folder stays open
-  // on the resolved folder throughout.
+  // metadata, so the source is the only store.
   private async readDraftParts(
     client: ImapFlow,
     resolved: ResolvedDraft,
@@ -2355,6 +2406,9 @@ ${messageContent}
       messageId,
       ...(attachments.length ? { attachments } : {}),
     });
+    // readDraftParts leaves Drafts open read-only; reopen it writable —
+    // EXPUNGE-on-\Deleted needs a read-write SELECT.
+    await client.mailboxOpen(resolved.folder);
     await client.messageDelete(String(resolved.uid), { uid: true });
   }
 

@@ -12,6 +12,13 @@ type DraftAttachmentUpload = {
   nextOffset: number;
 };
 
+// IMAP has no resumable-upload endpoint: chunks accumulate here until the
+// last one arrives, then the provider APPENDs the assembled message. Stored
+// beside the upload record under the same TTL.
+type DraftAttachmentUploadChunks = {
+  chunks: string[];
+};
+
 export async function saveDraftAttachmentUpload(
   emailAccountId: string,
   uploadId: string,
@@ -39,4 +46,32 @@ export async function deleteDraftAttachmentUpload(
 // The account is part of the key, so another account's upload id finds nothing.
 function uploadKey(emailAccountId: string, uploadId: string) {
   return `draft-attachment-upload:${emailAccountId}:${uploadId}`;
+}
+
+export async function appendDraftAttachmentUploadChunk(
+  emailAccountId: string,
+  uploadId: string,
+  chunkBase64: string,
+) {
+  const key = uploadChunksKey(emailAccountId, uploadId);
+  const stored = await redis.get<DraftAttachmentUploadChunks>(key);
+  await redis.set(
+    key,
+    { chunks: [...(stored?.chunks ?? []), chunkBase64] },
+    { ex: UPLOAD_TTL_SECONDS },
+  );
+}
+
+export async function takeDraftAttachmentUploadChunks(
+  emailAccountId: string,
+  uploadId: string,
+) {
+  const key = uploadChunksKey(emailAccountId, uploadId);
+  const stored = await redis.get<DraftAttachmentUploadChunks>(key);
+  await redis.del(key);
+  return stored?.chunks ?? [];
+}
+
+function uploadChunksKey(emailAccountId: string, uploadId: string) {
+  return `draft-attachment-upload:${emailAccountId}:${uploadId}:chunks`;
 }
