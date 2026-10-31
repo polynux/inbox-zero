@@ -147,8 +147,10 @@ export function createEmailProviderMailboxSource(input: {
       }
     },
     async enumerate({ page, session, pageSize }) {
+      let scopeId = "primary";
       try {
         const token = JSON.parse(page) as BootstrapToken;
+        scopeId = token.scopeId ?? "primary";
         const syncPage = await provider.getMessagesWithPagination({
           maxResults: Math.min(pageSize, maxPageSize),
           folderId: token.folderId ?? undefined,
@@ -199,7 +201,7 @@ export function createEmailProviderMailboxSource(input: {
         };
       } catch (error) {
         if (error instanceof InvalidMailboxSyncCursorError) {
-          return { status: "reset_required", scopeId: "primary" };
+          return { status: "reset_required", scopeId };
         }
         return mapProviderError(error);
       }

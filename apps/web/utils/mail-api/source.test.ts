@@ -447,6 +447,29 @@ describe("createEmailProviderMailboxSource", () => {
     });
     expect(result.status).toBe("page");
   });
+  it("rebuilds the failed folder scope, not primary, on an expired cursor", async () => {
+    const source = createEmailProviderMailboxSource({
+      accountId: "acc-1",
+      provider: {
+        name: "imap",
+        localMailSyncStrategy: "folder-delta",
+        async getMailboxSyncPage() {
+          throw new InvalidMailboxSyncCursorError();
+        },
+        async getMessagesWithPagination() {
+          throw new InvalidMailboxSyncCursorError();
+        },
+      } as unknown as EmailProvider,
+    });
+    const result = await source.readChanges({
+      session: { accountId: "acc-1", generation: "g1" },
+      requestId: "r1",
+      position: { streamId: "Archive", generation: "g1", checkpoint: "stale" },
+      pageSize: 20,
+      signal: new AbortController().signal,
+    });
+    expect(result).toEqual({ status: "reset_required", scopeId: "Archive" });
+  });
 
   it("enumerates an Outlook folder scope and starts catch-up from its folder cursor", async () => {
     const getMailboxSyncPage = vi.fn().mockResolvedValue({
