@@ -11,15 +11,14 @@ services:
     restart: unless-stopped
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    env_file:
-      - path: ${INBOX_ZERO_ENV_FILE:-../../apps/web/.env}
-        required: false
+    environment:
+      CRON_SECRET: ${CRON_SECRET:?set CRON_SECRET}
     command: >
       sh -c "
         apk add --no-cache curl &&
         while true; do
           echo \"[imap-poll] Polling IMAP accounts...\"
-          curl -fsS -X POST 'http://host.docker.internal:3000/api/imap/poll' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[imap-poll] Warning: poll request failed\"
+          curl --max-time 120 --fail-with-body -sS -X POST 'http://host.docker.internal:3000/api/imap/poll' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[imap-poll] Warning: poll request failed\"
           sleep 60
         done
       "
