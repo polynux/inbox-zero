@@ -149,7 +149,14 @@ How the provider uses this:
   rejected as move targets. The `Folders`/`Labels` containers are never
   SELECTed, and a folder that answers `NO` to SELECT is skipped. Each Proton
   message lives in exactly one real folder, so this yields one copy per
-  message. Cost of a thread op: 1 LIST + N × (SELECT + SEARCH) for N real
+  message — with one exception: mail the account sent to itself is ONE item with
+  both INBOX and Sent placements, and IMAP shows two copies with the same
+  Message-ID. Every mutating thread/message op therefore acts once per Proton
+  item on this layout (group by normalized Message-ID, prefer the INBOX
+  placement) and re-checks the live folder before each MOVE; a MOVE is never
+  issued into the folder the item already lives in. Bridge permanently deletes
+  a message moved to Trash while already in Trash, so trashing an
+  already-trashed item is a no-op success. Cost of a thread op: 1 LIST + N × (SELECT + SEARCH) for N real
   folders, plus fetches for candidates.
 - "Archive with label" COPYs into `Labels/<name>` then MOVEs to Archive.
 - Proton labels are `Labels/<name>` mailboxes: applying a label COPYs the
@@ -189,9 +196,9 @@ EHLO/auth check. Read-only; user runs it against their own Bridge.
 | Feature | Status | Basis |
 |---|---|---|
 | Inbox read | code-verified | `getInboxMessages`/`getMessagesWithPagination` open INBOX read-only; ids are folder-qualified (`uid@base64url(folder)`) so same-UID messages in different folders never collide |
-| Archive | code-verified | Per-member: each thread member moves from its own mailbox to `findArchiveFolder` (special-use `\Archive`, name fallback, creates `Archive`); members already there are skipped; vanished thread is a no-op like Gmail's 404-success |
-| Trash | code-verified | Per-member: each thread member moves from its own mailbox to `findTrashFolder` (special-use `\Trash`, name fallback; no-op when absent); vanished thread is a no-op like Gmail's 200-success |
-| Unarchive/untrash/restore | code-verified | Per-member restore from the member's own mailbox to INBOX; the id names the source folder, so a same-UID message elsewhere is never touched |
+| Archive | code-verified | Per-member: each thread member moves from its own mailbox to `findArchiveFolder` (special-use `\Archive`, name fallback, creates `Archive`); members already there are skipped; vanished thread is a no-op like Gmail's 404-success. On Bridge, one placement per Proton item (self-sent mail is one item with INBOX+Sent placements): archiving moves the INBOX placement, which hides the Sent placement until unarchive (Proton keeps one location per item) |
+| Trash | code-verified (deletion guard live-verified) | Per-member: each thread member moves from its own mailbox to `findTrashFolder` (special-use `\Trash`, name fallback; no-op when absent); vanished thread is a no-op like Gmail's 200-success. On Bridge, one placement per Proton item, live folder re-checked before each MOVE, never a MOVE into the folder the item already lives in. Bridge permanently deletes a message moved to Trash while already in Trash (live-verified), so trashing an already-trashed item is a no-op success |
+| Unarchive/untrash/restore | code-verified | Per-member restore from the member's own mailbox to INBOX (sent copies to Sent on untrash); the id names the source folder, so a same-UID message elsewhere is never touched. On Bridge, one placement per Proton item; unarchive/notspam/untrash restore the INBOX placement of a self-sent item |
 | Thread resolution | code-verified | Thread id = `t.` + base64url(root Message-ID). Every fetch path requests the References header, so listing, search, thread ops, `getMessage` and poll compute the same id. Lookup runs `SEARCH OR HEADER Message-ID/References/In-Reply-To <root>` per real folder and re-verifies the thread id exactly (Bridge's HEADER search is substring); malformed roots (no `@`, whitespace, <3 chars) are rejected. No window limit. Members key by full id (folder+UID). Trash and Junk are searched **only** for `untrashThread`/`markNotSpam`. Header-less threads carry the folder-qualified key and fetch directly |
 | Labels | live-probed + code-verified | On Bridge, labels are `Labels/<name>` mailboxes: apply = COPY (creates the mailbox), remove = expunge the copy in `Labels/<name>` only, found by Message-ID; the message stays in its real folder. Bridge allows no custom keywords (PERMANENTFLAGS has no `\*`). Servers without a `Labels` namespace keep folder semantics |
 | Send | code-verified | `sendSmtpEmail` via nodemailer STARTTLS to Bridge SMTP; Bridge saves to Sent automatically per Bridge docs |
@@ -206,7 +213,7 @@ EHLO/auth check. Read-only; user runs it against their own Bridge.
 
 ## Known limitations
 
-- **Polling instead of IDLE**: Bridge supports IDLE, but the app polls (cron every 1–2 min); at most 50 new messages per account and 50 s per run.
+- **Self-sent placement on archive/spam**: on Bridge, archiving or spamming a thread with self-sent members hides the Sent placement until unarchive/notspam (Proton keeps one location per item); unarchive/notspam/untrash restore it.
 - **First poll baselines**: linking seeds `lastSeenUid` from `uidNext - 1` and `uidValidity`; a null cursor baselines instead of reporting history as new. A UIDVALIDITY change re-baselines (messages that arrived during the reset are not processed).
 - **No UIDNEXT, no baseline**: a server that omits UIDNEXT leaves `lastSeenUid` unset; polling reports 0 until the server provides one.
 - **Deletion detection costs one `UID SEARCH ALL` per delta run**; deletions made before a cursor gained `knownUids` are not reported.
