@@ -1,0 +1,25 @@
+# Opt-in IMAP poller for the local Proton Bridge setup. IMAP has no push
+# channel, so new mail is picked up by polling /api/imap/poll; this mirrors the
+# cron container in the repo root docker-compose.yml (alpine + curl loop).
+#
+# Run alongside the app (web on http://localhost:3000) and Bridge:
+#   CRON_SECRET=<same value as apps/web/.env> \
+#     docker compose -f docker/proton-bridge/poll-cron.yml up -d
+services:
+  imap-poll-cron:
+    image: alpine:latest
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: ${INBOX_ZERO_ENV_FILE:-../../apps/web/.env}
+        required: false
+    command: >
+      sh -c "
+        apk add --no-cache curl &&
+        while true; do
+          echo \"[imap-poll] Polling IMAP accounts...\"
+          curl -fsS -X POST 'http://host.docker.internal:3000/api/imap/poll' -H \"Authorization: Bearer $${CRON_SECRET}\" || echo \"[imap-poll] Warning: poll request failed\"
+          sleep 60
+        done
+      "
