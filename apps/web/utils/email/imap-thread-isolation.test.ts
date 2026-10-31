@@ -141,37 +141,40 @@ beforeEach(() => {
 });
 
 describe("thread ops act on the right message in the right mailbox", () => {
-  it("archives a thread member in its own mailbox, not an unrelated same-UID message in INBOX", async () => {
-    const { client, state } = build(
+  it("archives only the INBOX member, not an unrelated same-UID message in Archive", async () => {
+    const { client, state, mailboxes } = build(
       {
-        INBOX: [
-          { uid: 3, subject: "unrelated newsletter", messageId: "<news@x>" },
+        INBOX: [{ uid: 3, subject: "thread root", messageId: "<root@x>" }],
+        Archive: [
+          { uid: 3, subject: "unrelated archived", messageId: "<news@x>" },
         ],
-        "All Mail": [{ uid: 3, subject: "thread root", messageId: "<root@x>" }],
-        Archive: [],
       },
-      { "All Mail": "\\All", Archive: "\\Archive" },
+      { Archive: "\\Archive" },
     );
     connection.client = client;
 
     const threadId = buildThreadId(undefined, undefined, "<root@x>");
     await new ImapProvider(config).archiveThread(threadId, "owner@example.com");
 
-    expect(state.moves).toEqual([{ uid: 3, from: "All Mail", to: "Archive" }]);
+    expect(state.moves).toEqual([{ uid: 3, from: "INBOX", to: "Archive" }]);
+    expect(mailboxes.Archive.map((m) => m.subject).sort()).toEqual([
+      "thread root",
+      "unrelated archived",
+    ]);
   });
 
-  it("restores the right message and never touches a same-UID message in another folder", async () => {
+  it("restores only the Archive member and never touches a same-UID message in Sent", async () => {
     const { client, state, mailboxes } = build(
       {
         INBOX: [],
-        Archive: [
+        Archive: [{ uid: 5, subject: "archived root", messageId: "<root@x>" }],
+        Sent: [
           {
             uid: 5,
-            subject: "unrelated archived mail",
+            subject: "unrelated sent",
             messageId: "<other@x>",
           },
         ],
-        Sent: [{ uid: 5, subject: "my reply", messageId: "<root@x>" }],
       },
       { Sent: "\\Sent", Archive: "\\Archive" },
     );
@@ -180,13 +183,10 @@ describe("thread ops act on the right message in the right mailbox", () => {
     const threadId = buildThreadId(undefined, undefined, "<root@x>");
     await new ImapProvider(config).unarchiveThread(threadId);
 
-    expect(state.moves).toEqual([{ uid: 5, from: "Sent", to: "INBOX" }]);
-    // Same UID in Archive is untouched: still there with its own subject.
-    expect(mailboxes.Archive.map((m) => m.subject)).toEqual([
-      "unrelated archived mail",
-    ]);
+    expect(state.moves).toEqual([{ uid: 5, from: "Archive", to: "INBOX" }]);
+    // Same UID in Sent is untouched: still there with its own subject.
+    expect(mailboxes.Sent.map((m) => m.subject)).toEqual(["unrelated sent"]);
   });
-
   it("returns same-UID members in two folders instead of collapsing them", async () => {
     const { client } = build(
       {
