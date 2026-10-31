@@ -397,11 +397,16 @@ function extractAttachments(structure?: MessageStructureObject): {
       disposition === "attachment" || (!!filename && !isInline);
     if (!isAttachment && !isInline) return;
 
+    // BODYSTRUCTURE size counts encoded bytes; for base64 that over-reports
+    // by ~4/3 (64 stored for 46 decoded). Report the decoded estimate:
+    // floor(size * 3/4), minus padding and line-break overhead. Anything
+    // else (quoted-printable, binary) keeps the encoded size.
+    const size = decodedBodyPartSize(node.size || 0, node.encoding);
     const entry = {
       attachmentId: node.part || "",
       filename: filename || `part-${node.part || "1"}`,
       mimeType: node.type || "application/octet-stream",
-      size: node.size || 0,
+      size,
       headers: {
         "content-description": node.description || "",
         "content-disposition": node.disposition || "",
@@ -417,6 +422,19 @@ function extractAttachments(structure?: MessageStructureObject): {
 
   visit(structure);
   return { attachments, inline };
+}
+
+// BODYSTRUCTURE reports encoded octets. Base64 inflates by 4/3 plus padding
+export function decodedBodyPartSize(
+  encodedSize: number,
+  encoding: string | undefined,
+): number {
+  if (!encoding || encoding.toLowerCase() !== "base64") return encodedSize;
+  const decoded = Math.floor((encodedSize * 3) / 4);
+  // A padded base64 tail decodes short; the worst case is two pad chars.
+  // CRLF line breaks (RFC 2045: 76-char lines) inflate by ~2 per 76.
+  const lineBreaks = Math.floor(encodedSize / 76) * 2;
+  return Math.max(0, decoded - 2 - lineBreaks);
 }
 
 function formatAddress(

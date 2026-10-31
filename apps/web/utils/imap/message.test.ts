@@ -211,6 +211,43 @@ describe("convertImapMessage attachments", () => {
     expect(parsed?.hasAttachment).toBe(true);
   });
 
+  // Live: BODYSTRUCTURE reported 64 for a part that downloads as 46 bytes.
+  it("reports the decoded size for base64 parts, encoded size otherwise", async () => {
+    const parsed = await convertImapMessage(
+      {
+        ...baseMessage,
+        bodyStructure: {
+          type: "multipart/mixed",
+          childNodes: [
+            {
+              type: "application/octet-stream",
+              part: "2",
+              size: 64,
+              encoding: "base64",
+              disposition: "attachment",
+              dispositionParameters: { filename: "file.bin" },
+            },
+            {
+              type: "text/plain",
+              part: "3",
+              size: 100,
+              encoding: "quoted-printable",
+              disposition: "attachment",
+              dispositionParameters: { filename: "note.txt" },
+            },
+          ],
+        },
+      } as never,
+      undefined,
+      "INBOX",
+    );
+
+    expect(parsed?.attachments?.map((a) => [a.filename, a.size])).toEqual([
+      ["file.bin", 46],
+      ["note.txt", 100],
+    ]);
+  });
+
   it("treats a named part as an attachment and an inline part as inline", async () => {
     const parsed = await convertImapMessage(
       {
