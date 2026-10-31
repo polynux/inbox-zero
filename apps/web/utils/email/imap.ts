@@ -769,10 +769,8 @@ export class ImapProvider implements EmailProvider {
       for (const msg of targets) {
         const { folder } = parseImapMessageId(msg.id);
         // Gmail semantics: archiving removes the INBOX placement only. A
-        // Sent copy is not an inbox copy, so it stays in Sent. On Bridge the
-        // INBOX placement of a self-sent item is the one selected placement,
-        // and the shared item's Sent placement goes with it (Proton keeps one
-        // location per item); unarchive restores the INBOX placement.
+        // Sent copy is not an inbox copy, so it stays in Sent; on Bridge the
+        // Sent placement of a self-sent item stays too (live-verified).
         if (folder !== "INBOX") continue;
         if (folder === archiveFolder) continue;
         try {
@@ -1740,7 +1738,7 @@ ${messageContent}
       const junkFolder = await findJunkFolder(client);
       const spamFolder = junkFolder || "Junk";
       const targets = (await isProtonBridgeLayout(client))
-        ? selectOnePlacementPerItem(messages)
+        ? selectOnePlacementPerItem(messages, spamFolder)
         : messages;
       for (const msg of targets) {
         const { folder } = parseImapMessageId(msg.id);
@@ -1758,7 +1756,7 @@ ${messageContent}
     return this.withConnection(async (client) => {
       const archiveFolder = await findArchiveFolder(client);
       const targets = (await isProtonBridgeLayout(client))
-        ? selectOnePlacementPerItem(messages)
+        ? selectOnePlacementPerItem(messages, archiveFolder)
         : messages;
       for (const msg of targets) {
         const { folder } = parseImapMessageId(msg.id);
@@ -1783,7 +1781,7 @@ ${messageContent}
       const sentFolder = await findSentFolder(client);
       const ownAddress = this.config.email.toLowerCase();
       const targets = (await isProtonBridgeLayout(client))
-        ? selectOnePlacementPerItem(messages)
+        ? selectOnePlacementPerItem(messages, trashFolder)
         : messages;
       for (const msg of targets) {
         const { folder } = parseImapMessageId(msg.id);
@@ -2248,10 +2246,14 @@ function normalizeItemMessageId(value: string | undefined): string | null {
   return normalized ? normalized : null;
 }
 
-// One placement per Proton item: prefer the received (INBOX) copy, else keep
+// One placement per Proton item: prefer the acted-on folder (archive/trash
+// act on the INBOX placement, restores on the source-folder one), else keep
 // the snapshot's first placement for determinism; members without a
 // Message-ID are distinct items (cannot be grouped) and always stay.
-function selectOnePlacementPerItem(messages: ParsedMessage[]): ParsedMessage[] {
+function selectOnePlacementPerItem(
+  messages: ParsedMessage[],
+  preferredFolder = "INBOX",
+): ParsedMessage[] {
   const byItem = new Map<string, ParsedMessage>();
   const headerless: ParsedMessage[] = [];
   for (const message of messages) {
@@ -2265,10 +2267,10 @@ function selectOnePlacementPerItem(messages: ParsedMessage[]): ParsedMessage[] {
       byItem.set(itemId, message);
       continue;
     }
-    const prefersInbox =
-      parseImapMessageId(message.id).folder === "INBOX" &&
-      parseImapMessageId(existing.id).folder !== "INBOX";
-    if (prefersInbox) byItem.set(itemId, message);
+    const prefersIncoming =
+      parseImapMessageId(message.id).folder === preferredFolder &&
+      parseImapMessageId(existing.id).folder !== preferredFolder;
+    if (prefersIncoming) byItem.set(itemId, message);
   }
   const selected = [...byItem.values(), ...headerless];
   const order = new Map(messages.map((message, index) => [message, index]));

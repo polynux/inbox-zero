@@ -3584,26 +3584,62 @@ describe("ImapProvider Bridge shared-item placement (self-sent mail)", () => {
     expect(mailboxesOf(fake).Trash.map((m) => m.messageId)).toEqual([root]);
   });
 
-  it("archive and spam move a self-sent item once without deleting it", async () => {
+  // Live Bridge behavior differs by op: archiving the INBOX placement of a
+  // self-sent item keeps its Sent placement, while spam/trash relocate the
+  // whole item (Sent placement hides until restored).
+  function relocatingMoves(fake: FakeImapTestClient, keepSentFrom: string[]) {
+    const base = fake.client.messageMove;
+    fake.client.messageMove = vi.fn(async (range: string, to: string) => {
+      const from = fake.opened.at(-1) || "";
+      if (keepSentFrom.includes(from)) {
+        const store = mailboxesOf(fake);
+        const index = store[from]?.findIndex((m) => m.uid === Number(range));
+        if (index === undefined || index < 0) return;
+        const [moved] = store[from].splice(index, 1);
+        store[to]?.push(moved);
+        return;
+      }
+      return (base as (range: string, to: string) => Promise<unknown>)(
+        range,
+        to,
+      );
+    });
+  }
+
+  it("archive keeps the Sent placement of a self-sent item", async () => {
     const { fake, threadId, root } = selfSentThread();
+    relocatingMoves(fake, ["INBOX"]);
     const provider = new ImapProvider({ ...config, email: "me@proton.me" });
     connection.client = fake.client;
 
     await provider.archiveThread(threadId, "me@proton.me");
 
     expect(mailboxesOf(fake).INBOX).toEqual([]);
-    expect(mailboxesOf(fake).Sent).toEqual([]);
+    expect(mailboxesOf(fake).Sent.map((m) => m.messageId)).toEqual([root]);
     expect(mailboxesOf(fake).Archive.map((m) => m.messageId)).toEqual([root]);
 
     await provider.unarchiveThread(threadId);
+
     expect(mailboxesOf(fake).Archive).toEqual([]);
+    expect(mailboxesOf(fake).INBOX.map((m) => m.messageId)).toEqual([root]);
+  });
+
+  it("spam relocates a self-sent item and not-spam restores it", async () => {
+    const { fake, threadId, root } = selfSentThread();
+    const provider = new ImapProvider({ ...config, email: "me@proton.me" });
+    connection.client = fake.client;
 
     await provider.markSpam(threadId);
-    const remaining = [
-      ...mailboxesOf(fake).INBOX,
-      ...mailboxesOf(fake).Sent,
-      ...mailboxesOf(fake).Spam,
-    ].map((m) => m.messageId);
-    expect(remaining).toEqual([root]);
+
+    expect(mailboxesOf(fake).INBOX).toEqual([]);
+    expect(mailboxesOf(fake).Sent).toEqual([]);
+    expect(mailboxesOf(fake).Spam.map((m) => m.messageId)).toEqual([root]);
+
+    await provider.markNotSpam(threadId);
+
+    expect(mailboxesOf(fake).Spam).toEqual([]);
+    const inbox = mailboxesOf(fake).INBOX.map((m) => m.messageId);
+    const sent = mailboxesOf(fake).Sent.map((m) => m.messageId);
+    expect([...inbox, ...sent]).toEqual([root]);
   });
 });
