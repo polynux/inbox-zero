@@ -5,6 +5,8 @@ import {
 } from "@/utils/email/mailbox-sync";
 import { getImapMailboxSyncPage } from "@/utils/imap/local-mail-sync";
 
+type SearchCriteria = { uid?: string; all?: boolean; since?: Date };
+
 vi.mock("@/utils/imap/client", () => ({
   withImapConnection: vi.fn(
     async (_config: unknown, fn: (client: unknown) => Promise<unknown>) =>
@@ -30,6 +32,11 @@ const stubClient: { mailbox: { path?: string } } & Record<string, unknown> = {
   }),
   search: vi.fn(async (criteria: Record<string, unknown>) => {
     if (typeof criteria.uid === "string") {
+      if (!criteria.uid.includes(":")) {
+        // Single UID: return its sequence number (1-based), as IMAP does.
+        const seq = mailboxUids.indexOf(Number(criteria.uid));
+        return seq < 0 ? [] : [seq + 1];
+      }
       const from = Number(criteria.uid.split(":")[0]);
       const matched = mailboxUids.filter((uid) => uid >= from);
       // RFC 3501: `n:*` matches the highest UID even when n is above it.
@@ -84,6 +91,11 @@ function lastUidOf(cursor: string): number {
   return decoded.state.lastUid;
 }
 
+function knownUidsOf(cursor: string): string | undefined {
+  const decoded = decodeMailboxSyncCursor(cursor, "imap");
+  return decoded.state.knownUids;
+}
+
 function cursorAt(lastUid: number): string {
   return encodeMailboxSyncCursor({
     version: 1,
@@ -95,6 +107,15 @@ function cursorAt(lastUid: number): string {
       lastUid,
     },
   });
+}
+
+const searchMock = vi.mocked(
+  stubClient.search as (criteria: SearchCriteria) => Promise<number[]>,
+);
+
+function searchAllCount(): number {
+  return searchMock.mock.calls.filter(([criteria]) => criteria.all === true)
+    .length;
 }
 
 beforeEach(() => {
@@ -220,6 +241,45 @@ describe("getImapMailboxSyncPage", () => {
     });
 
     expect(page.deletedMessageIds).toEqual([]);
+  });
+
+  it("runs the deletion diff once per multi-page delta run", async () => {
+    const first = await getImapMailboxSyncPage({
+      ...baseInput,
+      after: new Date("2025-01-01T00:00:00Z"),
+    });
+    expect(knownUidsOf(first.cursor)).toBe("1-5");
+
+    // UID 3 was expunged and four new messages (5, 6, 7 plus the kept 4) take
+    // two delta pages at limit 2.
+    mailboxUids = [1, 2, 4, 5, 6, 7];
+    const searchesBefore = searchAllCount();
+
+    const pages = [];
+    let cursor = first.cursor;
+    let hasMore = true;
+    while (hasMore) {
+      const page = await getImapMailboxSyncPage({
+        ...baseInput,
+        cursor,
+        limit: 2,
+      });
+      pages.push(page);
+      cursor = page.cursor;
+      hasMore = page.hasMore;
+    }
+
+    expect(pages).toHaveLength(2);
+    expect(searchAllCount() - searchesBefore).toBe(1);
+    // Only the last page reports the expunge; earlier pages carry the
+    // range-set they were given.
+    expect(pages[0].deletedMessageIds).toEqual([]);
+    expect(knownUidsOf(pages[0].cursor)).toBe("1-5");
+    expect(pages[1].deletedMessageIds).toEqual([qualifiedId(3)]);
+    expect(
+      pages.flatMap((page) => page.upsertedMessages.map((m) => m.id)),
+    ).toEqual([qualifiedId(4), qualifiedId(5), qualifiedId(6), qualifiedId(7)]);
+    expect(knownUidsOf(pages[1].cursor)).toBe("1-2,4-7");
   });
 
   it("rejects cursors from another account or folder", async () => {

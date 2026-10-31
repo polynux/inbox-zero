@@ -130,41 +130,19 @@ async function getImapDeltaPage(
     logger: Logger;
   },
 ): Promise<MailboxSyncPage> {
-  // UID-only search, so the diff below costs one round trip and no fetches.
-  const serverUids = await searchImapMessages(client, { all: true });
-  const serverUidSet = new Set(serverUids);
-  // A cursor written before knownUids existed bootstraps from the server's
-  // current UIDs: reporting a deletion the local mailbox never received is a
-  // harmless no-op, while missing one would leave stale mail behind.
-  const knownUidSet =
-    options.knownUids === undefined
-      ? new Set(serverUids)
-      : parseUidRanges(options.knownUids);
-  const deletedMessageIds = [...knownUidSet]
-    .filter((uid) => !serverUidSet.has(uid))
-    .sort((a, b) => a - b)
-    .map((uid) => encodeImapMessageId(options.folder, uid));
-
-  if (deletedMessageIds.length > 0) {
-    options.logger.info("IMAP folder delta reports deleted messages", {
-      emailAccountId: options.emailAccountId,
-      folder: options.folder,
-      count: deletedMessageIds.length,
-    });
-  }
-
-  const knownUids = formatUidRanges(serverUids);
-
   if (options.uidNext <= options.lastUid + 1) {
+    // Nothing new arrived, so this run ends on this page and pays for the
+    // expunge diff.
+    const diff = await diffDeletedUids(client, options);
     return {
       cursor: encodeImapCursor(
         options.emailAccountId,
         options.folder,
         options.uidValidity,
         options.lastUid,
-        knownUids,
+        diff.knownUids,
       ),
-      deletedMessageIds,
+      deletedMessageIds: diff.deletedMessageIds,
       hasMore: false,
       reset: false,
       upsertedMessages: [],
@@ -189,6 +167,10 @@ async function getImapDeltaPage(
     (highest, uid) => (uid > highest ? uid : highest),
     options.lastUid,
   );
+  const hasMore = newUids.length > pageUids.length;
+  // Deletions cost a full `UID SEARCH ALL`, so only the last page of a run
+  // pays for it; earlier pages carry the cursor's range-set forward unchanged.
+  const diff = hasMore ? null : await diffDeletedUids(client, options);
 
   return {
     cursor: encodeImapCursor(
@@ -196,13 +178,51 @@ async function getImapDeltaPage(
       options.folder,
       options.uidValidity,
       maxUid,
-      knownUids,
+      diff ? diff.knownUids : options.knownUids,
     ),
-    deletedMessageIds,
-    hasMore: newUids.length > pageUids.length,
+    deletedMessageIds: diff ? diff.deletedMessageIds : [],
+    hasMore,
     reset: false,
     upsertedMessages: messages,
   };
+}
+
+/**
+ * Compare the server's UIDs with the range-set the local mailbox holds.
+ * UID-only search, so the diff costs one round trip and no fetches.
+ */
+async function diffDeletedUids(
+  client: ImapFlow,
+  options: {
+    folder: string;
+    knownUids: string | undefined;
+    emailAccountId: string;
+    logger: Logger;
+  },
+): Promise<{ deletedMessageIds: string[]; knownUids: string }> {
+  const serverUids = await searchImapMessages(client, { all: true });
+  const serverUidSet = new Set(serverUids);
+  // A cursor written before knownUids existed bootstraps from the server's
+  // current UIDs: reporting a deletion the local mailbox never received is a
+  // harmless no-op, while missing one would leave stale mail behind.
+  const knownUidSet =
+    options.knownUids === undefined
+      ? new Set(serverUids)
+      : parseUidRanges(options.knownUids);
+  const deletedMessageIds = [...knownUidSet]
+    .filter((uid) => !serverUidSet.has(uid))
+    .sort((a, b) => a - b)
+    .map((uid) => encodeImapMessageId(options.folder, uid));
+
+  if (deletedMessageIds.length > 0) {
+    options.logger.info("IMAP folder delta reports deleted messages", {
+      emailAccountId: options.emailAccountId,
+      folder: options.folder,
+      count: deletedMessageIds.length,
+    });
+  }
+
+  return { deletedMessageIds, knownUids: formatUidRanges(serverUids) };
 }
 
 async function getImapSnapshotPage(
