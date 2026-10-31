@@ -55,6 +55,7 @@ export function parseThreadRootMessageId(threadId: string): string | null {
     threadId.slice(THREAD_ID_PREFIX.length),
     "base64url",
   ).toString("utf8");
+  if (!root) throw new SafeError("Thread id holds an empty root Message-ID");
   // The decoded root becomes a SEARCH term, and gluon matches substrings:
   // a one-character root fans out over the whole mailbox. `Buffer.from(x,
   // "base64url")` never throws on bad input, so decodability alone proves
