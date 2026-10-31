@@ -376,6 +376,49 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     ]);
   });
 
+  it("untrashThread on a flagged-\\All server also searches Trash", async () => {
+    const root = "<trashed@x>";
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, {
+            messageId: "<other@x>",
+          }),
+        ],
+      },
+      {
+        path: "All Mail",
+        specialUse: "\\All",
+        messages: [
+          message(30, "2026-09-01", "alice@x", undefined, {
+            messageId: root,
+          }),
+        ],
+      },
+      {
+        path: "Trash",
+        specialUse: "\\Trash",
+        messages: [
+          message(30, "2026-09-01", "alice@x", undefined, {
+            messageId: root,
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const messages = await new ImapProvider(config).getThreadMessages(
+      buildThreadId(undefined, undefined, root),
+      { includeTrashAndJunk: true },
+    );
+
+    // The global mailbox omits deleted mail, so the thread resolves from
+    // Trash even on a flagged-\All server.
+    expect(fake.opened).toEqual(expect.arrayContaining(["All Mail", "Trash"]));
+    expect(messages.map((m) => m.headers["message-id"])).toContain(root);
+  });
+
   it("fans out over real folders on Bridge, never returning All Mail view ids", async () => {
     const fake = createFakeClient([
       {

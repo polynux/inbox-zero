@@ -1876,9 +1876,10 @@ ${messageContent}
  * server never narrows a search. Otherwise fan out over every selectable
  * real mailbox, skipping views whose messages also live in a real folder.
  * Mutation callers (archive, trash, restore, move, mark, star) pass
- * `forMutation: true`; Trash and Junk scoping stays as before: excluded by
- * default (listing/search scope) but included for thread resolution, so
- * untrash/markNotSpam can find threads living only there.
+ * `forMutation: true`; Trash and Junk are excluded by default (listing and
+ * search scope) but included when `includeTrashAndJunk` is set, so
+ * untrash/markNotSpam can find threads living only there — including on a
+ * flagged `\All` server, where the single global mailbox otherwise suffices.
  */
 async function resolveSearchFolders(
   client: ImapFlow,
@@ -1888,7 +1889,10 @@ async function resolveSearchFolders(
 
   const allMail = findAllMailInList(mailboxes);
   const flaggedAll = mailboxes.some((mb) => mb.specialUse === "\\All");
-  if (allMail && flaggedAll) return [allMail];
+  if (allMail && flaggedAll)
+    return options?.includeTrashAndJunk
+      ? [allMail, ...trashAndJunkPaths(mailboxes)]
+      : [allMail];
   const onBridge = !flaggedAll && isProtonBridgeLayoutInList(mailboxes);
 
   const skippedSpecialUse = new Set(
@@ -1911,6 +1915,18 @@ async function resolveSearchFolders(
     .map((mb) => mb.path);
 
   return paths.length > 0 ? paths : ["INBOX"];
+}
+
+// Selectable Trash/Junk mailbox paths from one LIST result. Gmail's `\All`
+// omits deleted mail, so thread resolution that must reach Trash (untrash)
+// searches them explicitly alongside the global mailbox.
+function trashAndJunkPaths(
+  mailboxes: { path: string; flags: Set<string>; specialUse?: string }[],
+): string[] {
+  return mailboxes
+    .filter((mb) => !mb.flags.has("\\Noselect"))
+    .filter((mb) => mb.specialUse === "\\Trash" || mb.specialUse === "\\Junk")
+    .map((mb) => mb.path);
 }
 
 /**
