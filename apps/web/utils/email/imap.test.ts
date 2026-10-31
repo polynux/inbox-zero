@@ -1702,6 +1702,16 @@ describe("ImapProvider thread id agreement across listing, getMessage and thread
     ];
   }
 
+  it("getThreads rejects a view folder id on Bridge", async () => {
+    const fake = createFakeClient(bridgeThreadMailboxes());
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).getThreads("All Mail"),
+    ).rejects.toThrow(/view mailbox/i);
+    expect(fake.opened).not.toContain("All Mail");
+  });
+
   function spreadBridgeMailboxes() {
     return [
       {

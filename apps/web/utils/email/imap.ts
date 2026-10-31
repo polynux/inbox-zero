@@ -344,6 +344,10 @@ export class ImapProvider implements EmailProvider {
   async getThreads(_folderId?: string): Promise<EmailThread[]> {
     return this.withConnection(async (client) => {
       const folder = _folderId || "INBOX";
+      if ((await isProtonBridgeLayout(client)) && isFallbackViewFolder(folder))
+        throw new SafeError(
+          `Cannot list threads in a Proton view mailbox (${folder})`,
+        );
       const mailbox = await client.mailboxOpen(folder, { readOnly: true });
       const messages = await fetchRecentMessages(client, mailbox, 50);
 
