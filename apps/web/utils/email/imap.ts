@@ -2412,7 +2412,7 @@ function isAlreadyInTargetError(error: unknown): boolean {
   return /already (exists|in|there)|ALREADYEXISTS/i.test(text);
 }
 
-class ImapThreadNotFoundError extends Error {
+export class ImapThreadNotFoundError extends Error {
   constructor(threadId: string) {
     super(`Thread ${threadId} not found`);
     this.name = "ImapThreadNotFoundError";

@@ -6,10 +6,10 @@ import {
   InvalidMailboxSyncCursorError,
 } from "@/utils/email/mailbox-sync";
 import { ProviderRateLimitModeError } from "@/utils/email/rate-limit-mode-error";
+import { ImapThreadNotFoundError } from "@/utils/email/imap";
 import { syncPageSchema } from "@inboxzero/mail-core/sync";
 import { createEmailProviderMailboxSource } from "./source";
 import type { EmailProvider } from "@/utils/email/types";
-import type { ParsedMessage } from "@/utils/types";
 
 vi.mock("server-only", () => ({}));
 
@@ -1122,6 +1122,37 @@ describe("createEmailProviderMailboxSource", () => {
         { key: { accountId: "acc-1", messageId: "m1" }, reason: "not_found" },
       ]);
     }
+  });
+  it("treats a vanished IMAP thread as missing instead of a 503", async () => {
+    const source = createEmailProviderMailboxSource({
+      accountId: "acc-1",
+      provider: {
+        name: "imap",
+        async getMessage() {
+          throw new ImapThreadNotFoundError("t.root");
+        },
+      } as unknown as EmailProvider,
+    });
+    const result = await source.hydrate({
+      session: { accountId: "acc-1", generation: "g1" },
+      requestId: "r1",
+      signal: new AbortController().signal,
+      keys: [{ accountId: "acc-1", messageId: "1@SU5CT1g" }],
+      purpose: "body",
+    });
+    expect(result).toEqual({
+      status: "ok",
+      value: {
+        changes: [],
+        bodies: [],
+        unresolved: [
+          {
+            key: { accountId: "acc-1", messageId: "1@SU5CT1g" },
+            reason: "not_found",
+          },
+        ],
+      },
+    });
   });
 
   it("emits an empty body observation when hydrate finds no text", async () => {
