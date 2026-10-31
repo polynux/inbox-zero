@@ -24,10 +24,9 @@ import type { LocalMailSyncResponse } from "@/utils/email/local-mail-sync-types"
 import type { OutlookFolder } from "@/utils/outlook/folders";
 import type { InboxZeroLabel } from "@/utils/label";
 import type { Logger } from "@/utils/logger";
-import type { ParsedMessage } from "@/utils/types";
 import type { ImapCredentialConfig } from "@/utils/imap/types";
 import { UnsupportedImapOperationError } from "@/utils/imap/types";
-import { SafeError } from "@/utils/error";
+import { DraftNotFoundError, SafeError } from "@/utils/error";
 import { withImapConnection } from "@/utils/imap/client";
 import {
   convertImapMessage,
@@ -61,7 +60,15 @@ import {
   moveMessageToFolder,
 } from "@/utils/imap/folder";
 import { parseImapMessageId } from "@/utils/imap/message-id";
-import { saveDraft } from "@/utils/imap/draft";
+import {
+  appendDraftMessage,
+  assertDraftHasNoAttachments,
+  draftNotFoundError,
+  encodeImapDraftId,
+  findDraftByMessageId,
+  resolveDraftUid,
+  saveDraft,
+} from "@/utils/imap/draft";
 import { sendSmtpEmail } from "@/utils/imap/mail";
 import {
   buildThreadId,
@@ -1127,6 +1134,8 @@ ${messageContent}
 
   // --- Drafts ---
 
+  // Draft listings carry the stable draft id (not the folder-qualified
+  // message id) so stored draft ids match listed ones.
   async getDrafts(options?: { maxResults?: number }): Promise<ParsedMessage[]> {
     return this.withConnection(async (client) => {
       const draftsFolder = await findDraftsFolder(client);
@@ -1137,34 +1146,47 @@ ${messageContent}
         { all: true },
         options?.maxResults || 20,
       );
-      return fetchMessagesByUids(client, uids);
+      const drafts = await fetchMessagesByUids(client, uids);
+      return drafts.map((draft) => {
+        const headerId = draft.headers["message-id"];
+        if (!headerId) return draft;
+        try {
+          return { ...draft, id: encodeImapDraftId(headerId) };
+        } catch {
+          return draft;
+        }
+      });
     });
   }
 
   async getDraft(draftId: string): Promise<ParsedMessage | null> {
-    const { folder, uid } = parseImapMessageId(draftId);
     return this.withConnection(async (client) => {
-      const draftsFolder = await findDraftsFolder(client);
-      if (!draftsFolder) return null;
-      if (folder !== draftsFolder) return null;
-      await client.mailboxOpen(draftsFolder, { readOnly: true });
-      return fetchMessageByUid(client, uid);
+      const resolved = await resolveDraftUid(client, draftId, {
+        readOnly: true,
+      });
+      return resolved?.message ?? null;
     });
   }
 
   async createDraft(params: {
     to: string;
+    from?: string;
+    cc?: string;
+    bcc?: string;
     subject: string;
     messageHtml: string;
     replyToMessageId?: string;
+    forwardedMessageId?: string;
   }): Promise<{ id: string }> {
     return this.withConnection(async (client) => {
       const id = await saveDraft(client, {
-        from: this.config.email,
+        from: params.from || this.config.email,
         to: params.to,
+        cc: params.cc,
+        bcc: params.bcc,
         subject: params.subject,
         html: params.messageHtml,
-        inReplyTo: params.replyToMessageId,
+        inReplyTo: params.replyToMessageId ?? params.forwardedMessageId,
       });
       return { id };
     });
@@ -1200,29 +1222,87 @@ ${messageContent}
     });
   }
 
+  // IMAP can't edit a message: APPEND the updated copy with the same
+  // Message-ID (so the stable draft id survives), then expunge the old UID.
+  // Append-first keeps a failure from losing the draft.
   async updateDraft(
-    _draftId: string,
-    _params: { messageHtml?: string; subject?: string },
+    draftId: string,
+    params: {
+      messageHtml?: string;
+      subject?: string;
+      to?: string;
+      from?: string;
+      cc?: string;
+      bcc?: string;
+    },
   ): Promise<void> {
-    throw new UnsupportedImapOperationError("updateDraft");
+    await this.withConnection(async (client) => {
+      const resolved = await resolveDraftUid(client, draftId);
+      if (!resolved) throw draftNotFoundError("update");
+      assertDraftHasNoAttachments(resolved.message, "update");
+      const headers = resolved.message.headers;
+      const messageId = headers["message-id"];
+      // Without the current Message-ID there is no id to keep stable: a
+      // fresh id would orphan the caller's draft.
+      if (!messageId) throw draftNotFoundError("update");
+      await appendDraftMessage(client, resolved.folder, {
+        from: params.from ?? headers.from,
+        to: params.to ?? headers.to ?? "",
+        cc: params.cc ?? headers.cc,
+        bcc: params.bcc ?? headers.bcc,
+        subject: params.subject ?? resolved.message.subject,
+        html: params.messageHtml ?? resolved.message.textHtml ?? "",
+        inReplyTo: headers["in-reply-to"],
+        references: headers.references,
+        messageId,
+      });
+      await client.messageDelete(String(resolved.uid), { uid: true });
+    });
   }
-
   async deleteDraft(draftId: string, _version?: string): Promise<boolean> {
-    const { folder, uid } = parseImapMessageId(draftId);
     return this.withConnection(async (client) => {
-      const draftsFolder = await findDraftsFolder(client);
-      if (!draftsFolder) return false;
-      if (folder !== draftsFolder) return false;
-      await client.mailboxOpen(draftsFolder);
-      await client.messageDelete(String(uid), { uid: true });
+      const resolved = await resolveDraftUid(client, draftId).catch(
+        (error: unknown) => {
+          if (error instanceof DraftNotFoundError) return null;
+          throw error;
+        },
+      );
+      if (!resolved) return false;
+      await client.messageDelete(String(resolved.uid), { uid: true });
       return true;
     });
   }
 
+  // Send the draft's current content via SMTP, then remove it from Drafts.
+  // Bridge files sent mail into Sent itself; the provider never APPENDs.
   async sendDraft(
-    _draftId: string,
+    draftId: string,
   ): Promise<{ messageId: string; threadId: string }> {
-    throw new UnsupportedImapOperationError("sendDraft");
+    return this.withConnection(async (client) => {
+      const resolved = await resolveDraftUid(client, draftId);
+      if (!resolved) throw draftNotFoundError("send");
+      assertDraftHasNoAttachments(resolved.message, "send");
+      const headers = resolved.message.headers;
+      const { messageId } = await sendSmtpEmail(this.config, {
+        to: headers.to ?? "",
+        from: headers.from || undefined,
+        cc: headers.cc,
+        bcc: headers.bcc,
+        subject: resolved.message.subject,
+        html: resolved.message.textHtml ?? "",
+        inReplyTo: headers["in-reply-to"],
+        references: headers.references,
+      });
+      await client.messageDelete(String(resolved.uid), { uid: true });
+      return {
+        messageId,
+        threadId: buildThreadId(
+          headers.references,
+          headers["in-reply-to"],
+          headers["message-id"],
+        ),
+      };
+    });
   }
 
   // --- Folders ---
@@ -1826,11 +1906,36 @@ ${messageContent}
     });
   }
 
+  // The compose flow hands `getDraft`'s message id back in; resolve it to
+  // the draft's stable id when the message still lives in Drafts.
   async getDraftReferenceForMessage(
-    _messageId: string,
+    messageId: string,
   ): Promise<{ id: string; version?: string } | null> {
-    // IMAP drafts are raw APPENDs with no link back to the source message
-    return null;
+    return this.withConnection(async (client) => {
+      const draftsFolder = await findDraftsFolder(client);
+      if (!draftsFolder) return null;
+      try {
+        const { folder, uid } = parseImapMessageId(messageId);
+        if (folder !== draftsFolder) return null;
+        await client.mailboxOpen(draftsFolder, { readOnly: true });
+        const message = await fetchMessageByUid(client, uid);
+        const headerId = message?.headers["message-id"];
+        if (!headerId) return null;
+        const found = await findDraftByMessageId(
+          client,
+          headerId.replace(/^<|>$/g, ""),
+        );
+        return found
+          ? {
+              id: encodeImapDraftId(
+                found.message.headers["message-id"] ?? headerId,
+              ),
+            }
+          : null;
+      } catch {
+        return null;
+      }
+    });
   }
 
   async getDraftAttachments(
