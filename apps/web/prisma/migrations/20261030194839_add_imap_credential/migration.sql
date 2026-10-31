@@ -13,7 +13,6 @@ CREATE TABLE "ImapCredential" (
     "password" TEXT NOT NULL,
     "lastPolledAt" TIMESTAMP(3),
     "lastSeenUid" INTEGER,
-    "uidValidity" BIGINT,
     "accountId" TEXT NOT NULL,
 
     CONSTRAINT "ImapCredential_pkey" PRIMARY KEY ("id")
