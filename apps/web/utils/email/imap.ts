@@ -34,6 +34,7 @@ import {
   fetchMessageByUid,
   fetchMessagesByUids,
   fetchRecentMessages,
+  parseReferencesHeader,
   parseSearchQuery,
   searchImapMessages,
 } from "@/utils/imap/message";
@@ -212,10 +213,13 @@ export class ImapProvider implements EmailProvider {
             envelope: true,
             flags: true,
             bodyStructure: true,
+            headers: ["references"],
           })) {
             const parsed = await convertImapMessage(
               msg,
-              undefined,
+              msg.headers?.length
+                ? parseReferencesHeader(msg.headers)
+                : undefined,
               folder,
               mailbox.specialUse,
             );
