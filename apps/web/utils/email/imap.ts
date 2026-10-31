@@ -702,8 +702,26 @@ export class ImapProvider implements EmailProvider {
         forMutation: true,
       });
       return this.withConnection(async (client) => {
+        const onBridge = await isProtonBridgeLayout(client);
+        const archiveFolder = onBridge ? await findArchiveFolder(client) : null;
+        const isLabelMove =
+          onBridge &&
+          archiveFolder &&
+          (_labelId === "Labels" || _labelId.startsWith("Labels/"));
         for (const msg of messages) {
           const { folder, uid } = parseImapMessageId(msg.id);
+          if (isLabelMove) {
+            // A Proton label is a view, not a location: COPY into it, then
+            // archive from the real folder — never MOVE into Labels/*.
+            if (folder !== _labelId) {
+              await client.mailboxOpen(folder);
+              await client.messageCopy(String(uid), _labelId, { uid: true });
+            }
+            if (folder === archiveFolder) continue;
+            await client.mailboxOpen(folder);
+            await moveMessageToFolder(client, uid, archiveFolder);
+            continue;
+          }
           if (folder === _labelId) continue;
           await client.mailboxOpen(folder);
           await moveMessageToFolder(client, uid, _labelId);
@@ -819,6 +837,13 @@ export class ImapProvider implements EmailProvider {
       forMutation: true,
     });
     return this.withConnection(async (client) => {
+      if (
+        (await isProtonBridgeLayout(client)) &&
+        isFallbackViewFolder(folderName)
+      )
+        throw new SafeError(
+          `Cannot move a thread into a Proton view mailbox (${folderName})`,
+        );
       for (const msg of messages) {
         const { folder, uid } = parseImapMessageId(msg.id);
         if (folder === folderName) continue;
@@ -1194,9 +1219,19 @@ ${messageContent}
   // --- Folders ---
 
   async getFolders(): Promise<OutlookFolder[]> {
-    return this.withConnection(async (client) =>
-      listFoldersAsOutlookFolders(client),
-    );
+    return this.withConnection(async (client) => {
+      const folders = await listFoldersAsOutlookFolders(client);
+      // Views are not move targets: on the Bridge layout All Mail, Starred,
+      // Labels/* and the Folders/Labels containers apply a label or show a
+      // view — a MOVE there strands or duplicates the message.
+      if (!(await isProtonBridgeLayout(client))) return folders;
+      return folders.filter(
+        (folder) =>
+          !isFallbackViewFolder(folder.id) &&
+          folder.id !== "Folders" &&
+          folder.id !== "Labels",
+      );
+    });
   }
 
   async getOrCreateFolderIdByName(folderName: string): Promise<string> {
@@ -1698,7 +1733,9 @@ ${messageContent}
   }
 
   // Attachment ids are MIME part ids from bodyStructure. Open the mailbox
-  // named by the folder-qualified message id and download that part.
+  // named by the folder-qualified message id, verify the part exists, then
+  // download it — a legitimately empty part returns empty bytes, while an
+  // absent part throws.
   private async downloadAttachmentPart(
     messageId: string,
     attachmentId: string,
@@ -1706,6 +1743,13 @@ ${messageContent}
     const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
       await client.mailboxOpen(folder, { readOnly: true });
+      const listed = await client.fetchOne(String(uid), {
+        bodyStructure: true,
+      });
+      if (!findBodyPart(listed?.bodyStructure, attachmentId))
+        throw new SafeError(
+          `Attachment part ${attachmentId} not found on message ${messageId}`,
+        );
       const downloaded = await client.download(String(uid), attachmentId, {
         uid: true,
       });
@@ -1713,10 +1757,6 @@ ${messageContent}
       for await (const chunk of downloaded.content) {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
       }
-      if (chunks.length === 0)
-        throw new SafeError(
-          `Attachment part ${attachmentId} not found on message ${messageId}`,
-        );
       return Buffer.concat(chunks);
     });
   }
@@ -1889,6 +1929,50 @@ function groupMessageIdsByFolder(
   return grouped;
 }
 
+function isNoResponse(error: unknown): boolean {
+  return (
+    !!error &&
+    typeof error === "object" &&
+    "responseStatus" in error &&
+    error.responseStatus === "NO"
+  );
+}
+
+// MIME part ids in `convertImapMessage` come from the bodyStructure tree, so
+// a download for a part absent from that tree is a wrong part id, not an
+// empty file. Empty parts legitimately download as zero bytes.
+function findBodyPart(
+  structure: { part?: string; childNodes?: unknown[] } | undefined | null,
+  attachmentId: string,
+): boolean {
+  if (!structure || typeof structure !== "object") return false;
+  if (structure.part === attachmentId) return true;
+  return (
+    Array.isArray(structure.childNodes) &&
+    structure.childNodes.some(
+      (child) =>
+        !!child &&
+        typeof child === "object" &&
+        findBodyPart(
+          child as { part?: string; childNodes?: unknown[] },
+          attachmentId,
+        ),
+    )
+  );
+}
+
+// View mailboxes on the Bridge layout never hold a message's only copy, so
+// a stale id pointing there must not be mutated.
+function isFallbackViewFolder(folder: string): boolean {
+  return (
+    folder === "All Mail" ||
+    folder.endsWith("/All Mail") ||
+    folder === "Labels" ||
+    folder.startsWith("Labels/") ||
+    folder === "Starred"
+  );
+}
+
 /**
  * Resolve every message of a thread across the whole account. A thread id
  * carries its normalized root Message-ID (`t.` + base64url), so SEARCH the
@@ -1906,9 +1990,13 @@ async function fetchThreadMessages(
 ): Promise<ParsedMessage[]> {
   // Header-less messages keep their folder-qualified listing key
   // (`uid@base64url(folder)`) in the thread id, so the owning message is
-  // fetchable directly — no search needed.
+  // fetchable directly — no search needed. A key naming a view mailbox on
+  // the Bridge layout (e.g. an older All Mail id) resolves there no longer:
+  // like a vanished thread, treat it as not found so mutations no-op.
   const fallback = parseFallbackThreadId(threadId);
   if (fallback) {
+    const onBridge = isProtonBridgeLayoutInList(await client.list());
+    if (onBridge && isFallbackViewFolder(fallback.folder)) return [];
     await client.mailboxOpen(fallback.folder, { readOnly: true });
     const direct = await fetchMessageByUid(client, fallback.uid);
     return direct ? [direct] : [];
@@ -1921,7 +2009,14 @@ async function fetchThreadMessages(
   const byUid = new Map<string, ParsedMessage>();
 
   for (const folder of folders) {
-    await client.mailboxOpen(folder, { readOnly: true });
+    try {
+      await client.mailboxOpen(folder, { readOnly: true });
+    } catch (error) {
+      // A container or a concurrently deleted folder answers SELECT with
+      // NO; skip it instead of failing the whole op.
+      if (!isNoResponse(error)) throw error;
+      continue;
+    }
     const candidates = await searchImapMessages(client, {
       or: [
         { header: { "Message-ID": root } },
