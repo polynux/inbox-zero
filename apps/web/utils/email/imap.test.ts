@@ -1899,7 +1899,49 @@ describe("ImapProvider thread id agreement across listing, getMessage and thread
         (key) => key in (call[0] as Record<string, unknown>),
       ),
     );
-    expect(headerSearches).toHaveLength(1);
+    expect(headerSearches).toHaveLength(fake.opened.length);
+  });
+
+  it("resolves a thread spread over INBOX, Sent and Folders/* with real-folder ids only", async () => {
+    const fake = createFakeClient(spreadBridgeMailboxes());
+    connection.client = fake.client;
+
+    const thread = await new ImapProvider(config).getThread(rootThreadId);
+
+    expect(thread.messages).toHaveLength(3);
+    expect(fake.opened).not.toContain("All Mail");
+    expect(
+      thread.messages
+        .map((m) =>
+          Buffer.from(m.id.slice(m.id.indexOf("@") + 1), "base64url").toString(
+            "utf8",
+          ),
+        )
+        .sort(),
+    ).toEqual(["Folders/Projets/AFPS", "INBOX", "Sent"]);
+  });
+
+  it("archives a message id obtained from getThread out of its real folder", async () => {
+    const fake = createFakeClient(spreadBridgeMailboxes());
+    const moved: Array<{ uid: number; to: string; from: string }> = [];
+    fake.client.messageMove = vi.fn(async (uid: string, to: string) => {
+      moved.push({ uid: Number(uid), to, from: fake.opened.at(-1) || "" });
+      const current = mailboxesOf(fake)[fake.opened.at(-1) || ""];
+      const index = current.findIndex((m) => m.uid === Number(uid));
+      if (index >= 0) {
+        const [item] = current.splice(index, 1);
+        mailboxesOf(fake)[to].push(item);
+      }
+    });
+    connection.client = fake.client;
+
+    const thread = await new ImapProvider(config).getThread(rootThreadId);
+    const sentCopy = thread.messages.find((m) => m.id.startsWith("2@"));
+    expect(sentCopy).toBeDefined();
+    await new ImapProvider(config).archiveMessage(sentCopy!.id);
+
+    expect(moved).toEqual([{ uid: 2, to: "Archive", from: "Sent" }]);
+    expect(mailboxesOf(fake).Sent).toEqual([]);
   });
 });
 
@@ -2065,5 +2107,22 @@ describe("ImapProvider attachment edge cases", () => {
           (error: Error) => error.message,
         ),
     ).resolves.toMatch(/not found/i);
+  });
+
+  it("a legitimately empty part downloads as empty bytes without throwing", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    fake.client.fetchOne = vi.fn(async () => ({
+      bodyStructure: { part: "2", type: "text", subtype: "plain", size: 0 },
+    }));
+    fake.client.download = vi.fn(async () => ({
+      content: (async function* () {})(),
+    }));
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).getAttachment(qualifiedId("INBOX", 1), "2"),
+    ).resolves.toEqual({ data: "", size: 0 });
   });
 });
