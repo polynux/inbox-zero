@@ -162,11 +162,13 @@ substring match). Removing an absent label is a no-op. The
 ## Upgrading from bare-UID ids
 
 Older builds used a bare UID as an IMAP message id, a 24-hex hash as the
-thread id, and `fallback:<folder>:<uid>` for header-less thread ids. Thread
-ids are now `t.` + base64url(normalized root Message-ID). Ids are now
-folder-qualified (`<uid>@base64url(folder)`), and header-less threads carry
-that same key, so rows persisted against the old ids no longer resolve. On a
-dev database, clear the account's cached mail rows (at least `EmailMessage`
+thread id, `fallback:<folder>:<uid>` for header-less thread ids, and a
+folder-qualified (`<uid>@base64url(folder)`) message id as the draft id.
+Thread ids are now `t.` + base64url(normalized root Message-ID). Message ids
+are now folder-qualified (`<uid>@base64url(folder)`), header-less threads
+carry that same key, and draft ids are stable (`d.` + base64url(Message-ID)),
+so rows persisted against the old ids no longer resolve. On a dev database,
+clear the account's cached mail rows (at least `EmailMessage`
 and `ExecutedRule`) and reset `ImapCredential.lastSeenUid`/`uidValidity`, or delete and
 re-link the account, so the next sync repopulates. Schema changes ship as
 migrations `20261030194839_add_imap_credential` and
@@ -193,7 +195,7 @@ EHLO/auth check. Read-only; user runs it against their own Bridge.
 | Thread resolution | code-verified | Thread id = `t.` + base64url(root Message-ID). Every fetch path requests the References header, so listing, search, thread ops, `getMessage` and poll compute the same id. Lookup runs `SEARCH OR HEADER Message-ID/References/In-Reply-To <root>` per real folder and re-verifies the thread id exactly (Bridge's HEADER search is substring); malformed roots (no `@`, whitespace, <3 chars) are rejected. No window limit. Members key by full id (folder+UID). Trash and Junk are searched **only** for `untrashThread`/`markNotSpam`. Header-less threads carry the folder-qualified key and fetch directly |
 | Labels | live-probed + code-verified | On Bridge, labels are `Labels/<name>` mailboxes: apply = COPY (creates the mailbox), remove = expunge the copy in `Labels/<name>` only, found by Message-ID; the message stays in its real folder. Bridge allows no custom keywords (PERMANENTFLAGS has no `\*`). Servers without a `Labels` namespace keep folder semantics |
 | Send | code-verified | `sendSmtpEmail` via nodemailer STARTTLS to Bridge SMTP; Bridge saves to Sent automatically per Bridge docs |
-| Drafts | code-verified | `saveDraft` APPENDs with `\Draft` and returns a folder-qualified id; creates the Drafts folder when missing, else a clear error. Every draft carries a generated `Message-ID`, so when APPEND returns no UID (no UIDPLUS) the draft is found again by `HEADER Message-ID` in Drafts; only if that search misses does it throw (retrying would duplicate the draft). `sendDraft`/`updateDraft` explicitly unsupported |
+| Drafts | code-verified | `saveDraft` APPENDs with `\Draft` + `\Seen` and returns a stable id (`d.` + base64url(Message-ID)); updates APPEND a new copy with the same Message-ID then expunge the old UID (append-first, never loses the draft), so the id survives every save. `getDraft`/`deleteDraft` accept stable and legacy folder-qualified ids; `getDrafts` lists stable ids; `getDraftReferenceForMessage` maps a listed message back to its stable id. `sendDraft` sends the current content via SMTP (Bridge files it into Sent itself) then removes the draft. Attachments on a draft block update/send with a clear error instead of dropping them |
 | Role labels | code-verified | `convertImapMessage` maps roles from `specialUse` flags + exact well-known names only; user folders like `Presentations` never read as SENT |
 | Search | code-verified | `parseSearchQuery` covers from/to/subject/body/phrases/dates; `inboxOnly: false` searches a flagged `\All` mailbox when present (never Bridge's unflagged All Mail), else every selectable non-view mailbox except trash/junk/drafts; exact-address filters run before slicing |
 | Local mail sync | code-verified | `getImapMailboxSyncPage` delta/snapshot with UIDVALIDITY reset. Deletions: one `UID SEARCH ALL` per delta run (on its last page) reports UIDs missing since the last run (`knownUids` range-set in the cursor) as `deletedMessageIds`; Bridge has no CONDSTORE/QRESYNC |
@@ -209,8 +211,8 @@ EHLO/auth check. Read-only; user runs it against their own Bridge.
 - **No UIDNEXT, no baseline**: a server that omits UIDNEXT leaves `lastSeenUid` unset; polling reports 0 until the server provides one.
 - **Deletion detection costs one `UID SEARCH ALL` per delta run**; deletions made before a cursor gained `knownUids` are not reported.
 - **Thread ops cost one SELECT + SEARCH per real folder** on Bridge (All Mail is never used to resolve ids), so accounts with many `Folders/*` pay more round trips.
+- **Draft ids changed shape**: older builds returned a folder-qualified message id (`<uid>@base64url(folder)`) from `saveDraft`; current builds return a stable `d.` + base64url(Message-ID) id. Rows persisted against the old ids still resolve for read/delete, but an update re-APPENDs under the draft's Message-ID, so a legacy id that survived an update keeps pointing at the expunged UID. On a dev database, clear cached draft ids (e.g. re-save the draft) or re-link the account.
 - **Drafts need a recoverable UID**: APPEND without UIDPLUS is recovered by searching the draft's generated Message-ID (Bridge has UIDPLUS).
-- **`sendDraft`/`updateDraft` unsupported**: drafts can be created/listed/deleted, not edited or sent from the draft store.
 - **Label removal on non-Proton servers is a no-op**: folder-based labels can't be detached without moving the message.
 - **No filters/contacts/signatures/send-as**: `createFilter`, contacts, signatures, and send-as return empty or throw.
 - **Bridge offline = connection refused**: the app surfaces the IMAP/SMTP error; nothing queues locally.

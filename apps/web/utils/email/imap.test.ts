@@ -2,8 +2,10 @@ import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImapProvider } from "@/utils/email/imap";
 import * as mailModule from "@/utils/imap/mail";
+import { encodeImapDraftId } from "@/utils/imap/draft";
 import { encodeImapMessageId } from "@/utils/imap/message-id";
 import { buildThreadId } from "@/utils/imap/thread";
+import { DraftNotFoundError } from "@/utils/error";
 const connection = vi.hoisted(() => ({ client: null as unknown }));
 vi.mock("@/utils/imap/client", () => ({
   withImapConnection: async <T>(
@@ -17,9 +19,14 @@ type FakeMessage = {
   date: string;
   from?: string;
   to?: string;
+  cc?: string;
+  bcc?: string;
+  subject?: string;
+  html?: string;
   messageId?: string;
   inReplyTo?: string;
   references?: string;
+  hasAttachment?: boolean;
 };
 
 type FakeMailbox = {
@@ -48,9 +55,24 @@ function message(
   date: string,
   from?: string,
   to?: string,
-  headers?: { messageId?: string; inReplyTo?: string; references?: string },
+  headers?: {
+    messageId?: string;
+    inReplyTo?: string;
+    references?: string;
+    cc?: string;
+    bcc?: string;
+    subject?: string;
+    html?: string;
+    hasAttachment?: boolean;
+  },
 ): FakeMessage {
-  return { uid, date, from, to, ...headers };
+  return {
+    uid,
+    date,
+    from,
+    to,
+    ...headers,
+  };
 }
 
 function qualifiedId(folder: string, uid: number): string {
@@ -67,7 +89,12 @@ function mailboxesOf(fake: { client: unknown }): Record<string, FakeMessage[]> {
   return list;
 }
 
-function createFakeClient(mailboxes: FakeMailbox[]) {
+function createFakeClient(
+  mailboxes: FakeMailbox[],
+  options?: { uidPlus?: boolean },
+) {
+  const mailboxSupportsUidPlus = options?.uidPlus ?? true;
+  const appended: Array<{ path: string; flags: string[] }> = [];
   const opened: string[] = [];
   let current = mailboxes[0];
   const fetchedUids: number[] = [];
@@ -99,16 +126,29 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       ?.bodyStructure
       ? {
           part: "",
-          childNodes: [{ part: "2", type: "application/octet-stream" }],
+          childNodes: message.hasAttachment
+            ? [
+                { part: "1", type: "text/html" },
+                {
+                  part: "2",
+                  type: "application/octet-stream",
+                  disposition: "attachment",
+                  dispositionParameters: { filename: "file.bin" },
+                  size: 4,
+                },
+              ]
+            : [{ part: "2", type: "application/octet-stream" }],
         }
       : undefined;
     return {
       uid: message.uid,
       envelope: {
         date: new Date(message.date),
-        subject: `message ${message.uid}`,
+        subject: message.subject ?? `message ${message.uid}`,
         from: [{ address: message.from ?? `${message.uid}@example.com` }],
         to: message.to ? [{ address: message.to }] : [],
+        cc: message.cc ? [{ address: message.cc }] : [],
+        bcc: message.bcc ? [{ address: message.bcc }] : [],
         messageId: message.messageId,
         inReplyTo: message.inReplyTo,
       },
@@ -122,15 +162,17 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
     const lines = [
       `From: ${message.from ?? `${message.uid}@example.com`}`,
       `To: ${message.to ?? "owner@example.com"}`,
-      `Subject: message ${message.uid}`,
+      ...(message.cc ? [`Cc: ${message.cc}`] : []),
+      ...(message.bcc ? [`Bcc: ${message.bcc}`] : []),
+      `Subject: ${message.subject ?? `message ${message.uid}`}`,
       `Date: ${new Date(message.date).toUTCString()}`,
       message.messageId ? `Message-ID: ${message.messageId}` : "",
       message.inReplyTo ? `In-Reply-To: ${message.inReplyTo}` : "",
       message.references ? `References: ${message.references}` : "",
       "MIME-Version: 1.0",
-      "Content-Type: text/plain; charset=utf-8",
+      "Content-Type: text/html; charset=utf-8",
     ].filter(Boolean);
-    return `${lines.join("\r\n")}\r\n\r\nbody of message ${message.uid}\r\n`;
+    return `${lines.join("\r\n")}\r\n\r\n${message.html ?? `body of message ${message.uid}`}\r\n`;
   }
 
   const client = {
@@ -238,6 +280,57 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
     }),
     messageFlagsAdd: vi.fn(async () => true),
     messageFlagsRemove: vi.fn(async () => true),
+    messageDelete: vi.fn(async (range: string, options?: { uid?: boolean }) => {
+      // UID DELETE flags \Deleted; the fake expunges immediately.
+      const ids = range
+        .split(",")
+        .map((part) => part.split(":").map(Number))
+        .flatMap(([start, end]) =>
+          end === undefined || Number.isNaN(end)
+            ? [start]
+            : Array.from(
+                { length: end - start + 1 },
+                (_, index) => start + index,
+              ),
+        );
+      const keep = options?.uid
+        ? current.messages.filter((item) => !ids.includes(item.uid))
+        : current.messages.filter((_, index) => !ids.includes(index + 1));
+      current.messages.splice(0, current.messages.length, ...keep);
+      return true;
+    }),
+    mailboxCreate: vi.fn(async (path: string) => {
+      if (!mailboxes.some((mailbox) => mailbox.path === path)) {
+        mailboxes.push({ path, messages: [] });
+      }
+    }),
+    append: vi.fn(
+      async (path: string, content: Buffer, flags?: string[], _date?: Date) => {
+        const mailbox = mailboxes.find((candidate) => candidate.path === path);
+        if (!mailbox) throw new Error(`mailbox ${path} not found`);
+        const nextUid = Math.max(0, ...mailbox.messages.map((m) => m.uid)) + 1;
+        const raw = content.toString("utf8");
+        const header = (name: string) => {
+          const match = raw.match(new RegExp(`^${name}: (.*)$`, "im"));
+          return match?.[1].trim();
+        };
+        mailbox.messages.push({
+          uid: nextUid,
+          date: new Date().toISOString(),
+          from: header("From"),
+          to: header("To"),
+          cc: header("Cc"),
+          bcc: header("Bcc"),
+          subject: header("Subject"),
+          html: raw.split("\r\n\r\n").slice(1).join("\r\n\r\n"),
+          messageId: header("Message-ID"),
+          inReplyTo: header("In-Reply-To"),
+          references: header("References"),
+        });
+        appended.push({ path, flags: flags ?? [] });
+        return mailboxSupportsUidPlus ? { uid: nextUid } : undefined;
+      },
+    ),
     fetch: vi.fn((range: string, query?: Record<string, unknown>) => {
       fetchQueries.push(query);
       const [start, end] = range.split(":");
@@ -273,6 +366,7 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
     opened,
     fetchedUids,
     fetchQueries,
+    appended,
   };
 }
 
@@ -630,6 +724,272 @@ describe("ImapProvider drafts without a Drafts mailbox", () => {
     await expect(provider.getDraft(missing)).resolves.toBeNull();
     await expect(provider.deleteDraft(missing)).resolves.toBe(false);
     expect(fake.opened).toEqual([]);
+  });
+});
+
+describe("ImapProvider stable draft ids", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  function draftsMailbox(): {
+    path: string;
+    specialUse: string;
+    messages: FakeMessage[];
+  } {
+    return { path: "Drafts", specialUse: "\\Drafts", messages: [] };
+  }
+
+  it("createDraft returns a stable id that resolves the draft", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+
+    const provider = new ImapProvider(config);
+    const { id } = await provider.createDraft({
+      to: "friend@example.com",
+      subject: "Hello",
+      messageHtml: "<p>Hi</p>",
+    });
+
+    expect(id.startsWith("d.")).toBe(true);
+    const draft = await provider.getDraft(id);
+    expect(draft?.subject).toBe("Hello");
+    expect(draft?.textHtml).toContain("Hi");
+    expect(draft?.headers["message-id"]).toBeTruthy();
+    expect(fake.appended).toEqual([
+      { path: "Drafts", flags: ["\\Draft", "\\Seen"] },
+    ]);
+  });
+
+  it("keeps the same draft id across updates with one copy in Drafts", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+
+    const provider = new ImapProvider(config);
+    const { id } = await provider.createDraft({
+      to: "friend@example.com",
+      subject: "v1",
+      messageHtml: "<p>one</p>",
+    });
+    const first = await provider.getDraft(id);
+    const firstMessageId = first?.headers["message-id"];
+    expect(firstMessageId).toBeTruthy();
+
+    await provider.updateDraft(id, {
+      subject: "v2",
+      messageHtml: "<p>two</p>",
+    });
+    await provider.updateDraft(id, {
+      subject: "v3",
+      messageHtml: "<p>three</p>",
+    });
+
+    const updated = await provider.getDraft(id);
+    expect(updated?.subject).toBe("v3");
+    expect(updated?.textHtml).toContain("three");
+    expect(updated?.headers["message-id"]).toBe(firstMessageId);
+    expect(mailboxesOf(fake).Drafts).toHaveLength(1);
+  });
+
+  it("ignores a substring Message-ID match when resolving a draft", async () => {
+    const fake = createFakeClient([
+      {
+        path: "Drafts",
+        specialUse: "\\Drafts",
+        messages: [
+          message(1, "2026-01-01", undefined, undefined, {
+            messageId: "<xabc123@example.com>",
+            subject: "decoy",
+            html: "decoy",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const provider = new ImapProvider(config);
+    // The SEARCH needle matches both; only the exact Message-ID resolves.
+    await expect(
+      provider.getDraft(encodeImapDraftId("<abc123@example.com>")),
+    ).resolves.toBeNull();
+  });
+
+  it("throws a clear error instead of dropping attachments on update", async () => {
+    const fake = createFakeClient([
+      {
+        path: "Drafts",
+        specialUse: "\\Drafts",
+        messages: [
+          message(1, "2026-01-01", undefined, undefined, {
+            messageId: "<draft-with-file@example.com>",
+            subject: "with file",
+            html: "body",
+            hasAttachment: true,
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).updateDraft(
+        encodeImapDraftId("<draft-with-file@example.com>"),
+        { subject: "edited" },
+      ),
+    ).rejects.toThrow(/attachment/i);
+    expect(mailboxesOf(fake).Drafts).toHaveLength(1);
+  });
+
+  it("rejects updating or deleting a missing draft", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+
+    const provider = new ImapProvider(config);
+    const missing = encodeImapDraftId("<gone@example.com>");
+    await expect(
+      provider.updateDraft(missing, { subject: "x" }),
+    ).rejects.toThrow(DraftNotFoundError);
+    await expect(provider.deleteDraft(missing)).resolves.toBe(false);
+  });
+
+  it("keeps reply threading headers through updates", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+
+    const provider = new ImapProvider(config);
+    const { id } = await provider.createDraft({
+      to: "friend@example.com",
+      subject: "Re: thread",
+      messageHtml: "<p>reply</p>",
+      replyToMessageId: "<parent@example.com>",
+    });
+
+    await provider.updateDraft(id, { subject: "Re: thread (edited)" });
+
+    const updated = await provider.getDraft(id);
+    expect(updated?.headers["in-reply-to"]).toBe("<parent@example.com>");
+    expect(updated?.threadId).toBe(
+      buildThreadId(
+        undefined,
+        "<parent@example.com>",
+        updated?.headers["message-id"],
+      ),
+    );
+  });
+
+  it("sendDraft sends the latest content via SMTP and removes the draft", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+    const sent: Array<Record<string, unknown>> = [];
+    const sendSpy = vi
+      .spyOn(mailModule, "sendSmtpEmail")
+      .mockImplementation(async (_config, options) => {
+        sent.push(options as Record<string, unknown>);
+        return { messageId: "<smtp-sent@example.com>" };
+      });
+    try {
+      const provider = new ImapProvider(config);
+      const { id } = await provider.createDraft({
+        to: "friend@example.com",
+        subject: "send me",
+        messageHtml: "<p>final</p>",
+      });
+      await provider.updateDraft(id, { subject: "send me (final)" });
+
+      const result = await provider.sendDraft(id);
+
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({
+        to: "friend@example.com",
+        subject: "send me (final)",
+      });
+      expect(String(sent[0]?.html)).toContain("final");
+      expect(result.messageId).toBe("<smtp-sent@example.com>");
+      expect(typeof result.threadId).toBe("string");
+      expect(mailboxesOf(fake).Drafts).toHaveLength(0);
+      await expect(provider.getDraft(id)).resolves.toBeNull();
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("sendDraft refuses to send a missing draft", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+    const sendSpy = vi
+      .spyOn(mailModule, "sendSmtpEmail")
+      .mockImplementation(async () => ({ messageId: "x" }));
+    try {
+      await expect(
+        new ImapProvider(config).sendDraft(
+          encodeImapDraftId("<gone@example.com>"),
+        ),
+      ).rejects.toThrow(DraftNotFoundError);
+      expect(sendSpy).not.toHaveBeenCalled();
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("deleteDraft removes the draft by stable id", async () => {
+    const fake = createFakeClient([
+      {
+        path: "Drafts",
+        specialUse: "\\Drafts",
+        messages: [
+          message(1, "2026-01-01", undefined, undefined, {
+            messageId: "<bye@example.com>",
+            subject: "bye",
+            html: "bye",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).deleteDraft(
+        encodeImapDraftId("<bye@example.com>"),
+      ),
+    ).resolves.toBe(true);
+    expect(mailboxesOf(fake).Drafts).toHaveLength(0);
+  });
+
+  it("getDraftReferenceForMessage finds the stable id by message id", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+
+    const provider = new ImapProvider(config);
+    const { id } = await provider.createDraft({
+      to: "friend@example.com",
+      subject: "Hello",
+      messageHtml: "<p>Hi</p>",
+    });
+    const draft = await provider.getDraft(id);
+
+    await expect(
+      provider.getDraftReferenceForMessage(draft?.id ?? "missing"),
+    ).resolves.toEqual({ id });
+    await expect(
+      provider.getDraftReferenceForMessage(qualifiedId("Drafts", 999)),
+    ).resolves.toBeNull();
+  });
+
+  it("getDrafts lists stable ids that deleteDraft accepts", async () => {
+    const fake = createFakeClient([draftsMailbox()]);
+    connection.client = fake.client;
+
+    const provider = new ImapProvider(config);
+    const { id } = await provider.createDraft({
+      to: "friend@example.com",
+      subject: "Hello",
+      messageHtml: "<p>Hi</p>",
+    });
+
+    const listed = await provider.getDrafts();
+    expect(listed.map((draft) => draft.id)).toEqual([id]);
+    await expect(provider.deleteDraft(listed[0].id)).resolves.toBe(true);
+    expect(mailboxesOf(fake).Drafts).toHaveLength(0);
   });
 });
 

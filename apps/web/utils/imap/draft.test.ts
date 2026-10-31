@@ -1,8 +1,7 @@
 import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findDraftsFolder } from "@/utils/imap/folder";
-import { encodeImapMessageId } from "@/utils/imap/message-id";
-import { saveDraft } from "@/utils/imap/draft";
+import { parseImapDraftId, saveDraft } from "@/utils/imap/draft";
 
 vi.mock("@/utils/imap/folder", () => ({
   findDraftsFolder: vi.fn(async () => "Drafts"),
@@ -66,8 +65,10 @@ describe("saveDraft", () => {
       text: "Hello",
     });
 
-    // Draft ids are folder-qualified so later reads/deletes open Drafts.
-    expect(id).toBe(encodeImapMessageId("Drafts", 42));
+    // Draft ids are stable across updates: they name the Message-ID, not the
+    // UID, so the id resolves after the same Message-ID is re-APPENDed.
+    expect(id.startsWith("d.")).toBe(true);
+    expect(parseImapDraftId(id)).toMatch(/@inbox-zero\.local$/);
 
     const headers = appendedHeaderLines(append);
     expect(headers).toEqual(
@@ -126,7 +127,9 @@ describe("saveDraft", () => {
     const raw = String(append.mock.calls[0][1]);
     expect(raw).toMatch(/^Message-ID: <[^>]+@inbox-zero\.local>$/m);
     expect(search).toHaveBeenCalledOnce();
-    expect(id).toBe(encodeImapMessageId("Drafts", 77));
+    // The id still names the generated Message-ID even though the UID came
+    // from a follow-up SEARCH.
+    expect(id.startsWith("d.")).toBe(true);
   });
 
   it("throws a clear error when APPEND returns no UID (no UIDPLUS)", async () => {
