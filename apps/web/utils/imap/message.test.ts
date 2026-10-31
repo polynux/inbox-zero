@@ -1,78 +1,161 @@
-import { describe, expect, it } from "vitest";
-import { convertImapMessage, parseSearchQuery } from "@/utils/imap/message";
+import { describe, expect, it, vi } from "vitest";
+import {
+  convertImapMessage,
+  parseSearchQuery,
+  searchImapMessages,
+} from "@/utils/imap/message";
 describe("parseSearchQuery", () => {
   it("parses from: query", () => {
-    const result = parseSearchQuery("from:test@example.com");
-    expect(result).toEqual({ from: "test@example.com" });
+    expect(parseSearchQuery("from:test@example.com")).toEqual({
+      criteria: { from: "test@example.com" },
+      hasAttachment: false,
+    });
   });
 
   it("parses to: query", () => {
-    const result = parseSearchQuery("to:user@example.com");
-    expect(result).toEqual({ to: "user@example.com" });
+    expect(parseSearchQuery("to:user@example.com")).toEqual({
+      criteria: { to: "user@example.com" },
+      hasAttachment: false,
+    });
   });
 
   it("parses subject: query", () => {
-    const result = parseSearchQuery("subject:meeting");
-    expect(result).toEqual({ subject: "meeting" });
+    expect(parseSearchQuery("subject:meeting")).toEqual({
+      criteria: { subject: "meeting" },
+      hasAttachment: false,
+    });
   });
 
   it("parses is:unread", () => {
-    const result = parseSearchQuery("is:unread");
-    expect(result).toEqual({ unseen: true });
+    expect(parseSearchQuery("is:unread")).toEqual({
+      criteria: { unseen: true },
+      hasAttachment: false,
+    });
   });
 
   it("parses is:read", () => {
-    const result = parseSearchQuery("is:read");
-    expect(result).toEqual({ seen: true });
+    expect(parseSearchQuery("is:read")).toEqual({
+      criteria: { seen: true },
+      hasAttachment: false,
+    });
   });
 
-  it("parses combined queries", () => {
-    const result = parseSearchQuery("from:test@ex.com is:unread");
-    expect(result).toEqual({
-      and: [{ from: "test@ex.com" }, { unseen: true }],
+  it("maps is:seen, is:starred and is:flagged to flags", () => {
+    expect(parseSearchQuery("is:seen").criteria).toEqual({ seen: true });
+    expect(parseSearchQuery("is:starred").criteria).toEqual({
+      flagged: true,
+    });
+    expect(parseSearchQuery("is:flagged").criteria).toEqual({
+      flagged: true,
+    });
+  });
+
+  // imapflow has no `and` operator (`{and: [...]}` compiles to nothing, which
+  // Bridge answers `false` to): distinct terms merge into one natively-ANDed
+  // object.
+  it("merges combined queries into one natively-ANDed object", () => {
+    expect(parseSearchQuery("from:test@ex.com is:unread")).toEqual({
+      criteria: { from: "test@ex.com", unseen: true },
+      hasAttachment: false,
+    });
+  });
+
+  // A repeated key cannot merge into one object, so AND without `and`: NOT
+  // (NOT a OR NOT b).
+  it("expresses repeated keys as De Morgan NOT/OR", () => {
+    expect(parseSearchQuery("invoice receipt").criteria).toEqual({
+      not: { or: [{ not: { body: "invoice" } }, { not: { body: "receipt" } }] },
     });
   });
 
   it("returns all:true for empty query", () => {
-    const result = parseSearchQuery("");
-    expect(result).toEqual({ all: true });
+    expect(parseSearchQuery("")).toEqual({
+      criteria: { all: true },
+      hasAttachment: false,
+    });
   });
 
   it("treats bare text as body search", () => {
-    const result = parseSearchQuery("important");
-    expect(result).toEqual({ body: "important" });
+    expect(parseSearchQuery("important")).toEqual({
+      criteria: { body: "important" },
+      hasAttachment: false,
+    });
   });
 
   it("keeps a quoted field value as one term", () => {
-    const result = parseSearchQuery('subject:"weekly update"');
-    expect(result).toEqual({ subject: "weekly update" });
+    expect(parseSearchQuery('subject:"weekly update"')).toEqual({
+      criteria: { subject: "weekly update" },
+      hasAttachment: false,
+    });
   });
 
   it("keeps a bare quoted phrase as one body term", () => {
-    const result = parseSearchQuery('"exact phrase"');
-    expect(result).toEqual({ body: "exact phrase" });
+    expect(parseSearchQuery('"exact phrase"')).toEqual({
+      criteria: { body: "exact phrase" },
+      hasAttachment: false,
+    });
   });
 
-  it("mixes quoted values with unquoted terms", () => {
-    const result = parseSearchQuery(
-      'from:alice@example.com subject:"weekly update" important',
-    );
-    expect(result).toEqual({
-      and: [
-        { from: "alice@example.com" },
-        { subject: "weekly update" },
-        { body: "important" },
-      ],
+  it("mixes quoted values with unquoted terms in one object", () => {
+    expect(
+      parseSearchQuery('from:alice@example.com subject:"weekly update" important')
+        .criteria,
+    ).toEqual({
+      from: "alice@example.com",
+      subject: "weekly update",
+      body: "important",
     });
   });
 
   it("treats an unterminated quote as a single term", () => {
-    expect(parseSearchQuery('subject:"weekly update')).toEqual({
+    expect(parseSearchQuery('subject:"weekly update').criteria).toEqual({
       subject: "weekly update",
     });
-    expect(parseSearchQuery('"exact phrase')).toEqual({
+    expect(parseSearchQuery('"exact phrase').criteria).toEqual({
       body: "exact phrase",
     });
+  });
+
+  it("returns has:attachment as a client-side filter flag, never BODY text", () => {
+    expect(parseSearchQuery("has:attachment invoice")).toEqual({
+      criteria: { body: "invoice" },
+      hasAttachment: true,
+    });
+    expect(parseSearchQuery("has:attachment").criteria).toEqual({
+      all: true,
+    });
+  });
+
+  it("drops unknown is:/has: tokens instead of searching them as body text", () => {
+    expect(parseSearchQuery("is:snoozed invoice").criteria).toEqual({
+      body: "invoice",
+    });
+    expect(parseSearchQuery("has:click invoice").criteria).toEqual({
+      body: "invoice",
+    });
+    expect(parseSearchQuery("is:snoozed").criteria).toEqual({ all: true });
+  });
+});
+
+describe("searchImapMessages", () => {
+  // Live: Bridge answers `false` to queries it cannot run. That is not "no
+  // hits": warn so it never reads as an empty mailbox.
+  it("warns and returns [] when the server returns a non-array result", async () => {
+    const warn = vi.fn();
+    const client = {
+      search: async () => false,
+      mailbox: { path: "INBOX" },
+    };
+
+    const result = await searchImapMessages(
+      client as never,
+      { and: [{ from: "x" }] },
+      undefined,
+      { warn },
+    );
+
+    expect(result).toEqual([]);
+    expect(warn).toHaveBeenCalledOnce();
   });
 });
 

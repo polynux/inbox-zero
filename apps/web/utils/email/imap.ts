@@ -60,7 +60,10 @@ import {
   listLabelMailboxes,
   moveMessageToFolder,
 } from "@/utils/imap/folder";
-import { parseImapMessageId } from "@/utils/imap/message-id";
+import {
+  encodeImapMessageId,
+  parseImapMessageId,
+} from "@/utils/imap/message-id";
 import {
   appendDraftMessage,
   assertDraftHasNoAttachments,
@@ -186,8 +189,11 @@ export class ImapProvider implements EmailProvider {
       const offset = options.pageToken ? Number(options.pageToken) : 0;
 
       const criteria: Record<string, unknown> = {};
+      let attachmentOnly = false;
       if (options.query) {
-        Object.assign(criteria, parseSearchQuery(options.query));
+        const parsed = parseSearchQuery(options.query);
+        Object.assign(criteria, parsed.criteria);
+        attachmentOnly = parsed.hasAttachment;
       } else {
         criteria.all = true;
       }
@@ -208,18 +214,45 @@ export class ImapProvider implements EmailProvider {
       }
       ranked.sort((a, b) => b.time - a.time || b.uid - a.uid);
 
-      const page = ranked.slice(offset, offset + maxResults);
+      // has:attachment has no SEARCH key: fetch envelopes for the ranked
+      // matches, keep the ones bodyStructure flags as attachments, page that.
+      let candidates = ranked;
+      if (attachmentOnly) {
+        const byFolder = new Map<string, number[]>();
+        for (const entry of ranked) {
+          const uids = byFolder.get(entry.folder) || [];
+          uids.push(entry.uid);
+          byFolder.set(entry.folder, uids);
+        }
+        const fetched: ParsedMessage[] = [];
+        for (const [folder, uids] of byFolder) {
+          await client.mailboxOpen(folder, { readOnly: true });
+          fetched.push(...(await fetchMessagesByUids(client, uids)));
+        }
+        const keep = new Set(
+          fetched
+            .filter((m) => m.attachments && m.attachments.length > 0)
+            .map((m) => m.id),
+        );
+        candidates = ranked.filter((entry) =>
+          keep.has(encodeImapMessageId(entry.folder, entry.uid)),
+        );
+      }
+
+      const page = candidates.slice(offset, offset + maxResults);
       const collected: ParsedMessage[] = [];
       // One folder open per folder on the page, not one per message.
-      const byFolder = new Map<string, number[]>();
+      const pageByFolder = new Map<string, number[]>();
       for (const entry of page) {
-        const uids = byFolder.get(entry.folder) || [];
+        const uids = pageByFolder.get(entry.folder) || [];
         uids.push(entry.uid);
-        byFolder.set(entry.folder, uids);
+        pageByFolder.set(entry.folder, uids);
       }
       // Preserve the page order: fetch per folder, then re-sort by rank.
-      const rank = new Map(page.map((entry, index) => [`${entry.folder}:${entry.uid}`, index]));
-      for (const [folder, uids] of byFolder) {
+      const rank = new Map(
+        page.map((entry, index) => [`${entry.folder}:${entry.uid}`, index]),
+      );
+      for (const [folder, uids] of pageByFolder) {
         await client.mailboxOpen(folder, { readOnly: true });
         collected.push(...(await fetchMessagesByUids(client, uids)));
       }
@@ -229,7 +262,9 @@ export class ImapProvider implements EmailProvider {
           (rank.get(byFolderKeyOf(b.id)) ?? 0),
       );
       const nextPageToken =
-        offset + maxResults < ranked.length ? String(offset + maxResults) : undefined;
+        offset + maxResults < candidates.length
+          ? String(offset + maxResults)
+          : undefined;
 
       return { messages: collected, nextPageToken };
     });

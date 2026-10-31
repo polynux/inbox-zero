@@ -211,6 +211,46 @@ function createFakeClient(
         criteria: Record<string, unknown>,
         options?: { uid?: boolean },
       ) => {
+        const matches = (
+          item: FakeMessage,
+          query: Record<string, unknown>,
+        ): boolean =>
+          Object.entries(query).every(([key, expected]) => {
+            if (key === "uid" || key === "all") return true;
+            if (key === "header") {
+              const value = Object.values(
+                expected as Record<string, string>,
+              )[0];
+              const needle = String(value).replace(/^<|>$/g, "");
+              return [item.messageId, item.inReplyTo, item.references].some(
+                (id) => id?.replace(/^<|>$/g, "").includes(needle),
+              );
+            }
+            if (key === "from" || key === "to") {
+              return (item[key] ?? "")
+                .toLowerCase()
+                .includes(String(expected).toLowerCase());
+            }
+            if (key === "subject") {
+              return (item.subject ?? "")
+                .toLowerCase()
+                .includes(String(expected).toLowerCase());
+            }
+            if (key === "body") {
+              const haystack =
+                `${item.subject ?? ""} ${item.html ?? ""}`.toLowerCase();
+              return haystack.includes(String(expected).toLowerCase());
+            }
+            if (key === "or") {
+              return (expected as Array<Record<string, unknown>>).some((part) =>
+                matches(item, part),
+              );
+            }
+            if (key === "not") {
+              return !matches(item, expected as Record<string, unknown>);
+            }
+            return true;
+          });
         if (criteria.uid !== undefined) {
           const match = current.messages.find(
             (item) => item.uid === Number(criteria.uid),
@@ -219,44 +259,28 @@ function createFakeClient(
           // imapflow returns UIDs when uid:true, sequence numbers otherwise
           return options?.uid === false ? [sequenceOf(match)] : [match.uid];
         }
-        if (criteria.header) {
-          const header = criteria.header as Record<string, string>;
-          const value = Object.values(header)[0];
-          const needle = String(value).replace(/^<|>$/g, "");
-          return current.messages
-            .filter((item) =>
-              [item.messageId, item.inReplyTo, item.references].some((id) =>
-                id?.replace(/^<|>$/g, "").includes(needle),
-              ),
-            )
-            .map((item) => item.uid);
-        }
-        if (
-          typeof criteria.from === "string" ||
-          typeof criteria.to === "string"
-        ) {
-          const field = typeof criteria.from === "string" ? "from" : "to";
-          const needle = String(criteria[field]).toLowerCase();
-          return current.messages
-            .filter((item) =>
-              (item[field] ?? "").toLowerCase().includes(needle),
-            )
-            .map((item) => item.uid);
-        }
-        if (criteria.or) {
+        if (criteria.or && !criteria.not) {
           const ors = criteria.or as Array<{ header: Record<string, string> }>;
-          const needles = ors.map((o) =>
-            String(Object.values(o.header)[0]).replace(/^<|>$/g, ""),
+          const headersOnly = ors.every(
+            (part) =>
+              Object.keys(part).length === 1 && "header" in part,
           );
-          return current.messages
-            .filter((item) =>
-              [item.messageId, item.inReplyTo, item.references].some((id) =>
-                needles.some((n) => id?.replace(/^<|>$/g, "").includes(n)),
-              ),
-            )
-            .map((item) => item.uid);
+          if (headersOnly) {
+            const needles = ors.map((o) =>
+              String(Object.values(o.header)[0]).replace(/^<|>$/g, ""),
+            );
+            return current.messages
+              .filter((item) =>
+                [item.messageId, item.inReplyTo, item.references].some((id) =>
+                  needles.some((n) => id?.replace(/^<|>$/g, "").includes(n)),
+                ),
+              )
+              .map((item) => item.uid);
+          }
         }
-        return current.messages.map((item) => item.uid);
+        return current.messages
+          .filter((item) => matches(item, criteria))
+          .map((item) => item.uid);
       },
     ),
     fetchOne: vi.fn(
@@ -461,7 +485,14 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       {
         path: "All Mail",
         specialUse: "\\All",
-        messages: [message(40, "2026-07-01"), message(41, "2026-08-01")],
+        messages: [
+          message(40, "2026-07-01", undefined, undefined, {
+            subject: "invoice July",
+          }),
+          message(41, "2026-08-01", undefined, undefined, {
+            subject: "invoice August",
+          }),
+        ],
       },
       {
         path: "Trash",
@@ -530,7 +561,14 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     const fake = createFakeClient([
       {
         path: "INBOX",
-        messages: [message(1, "2026-01-01"), message(2, "2026-03-01")],
+        messages: [
+          message(1, "2026-01-01", undefined, undefined, {
+            subject: "invoice January",
+          }),
+          message(2, "2026-03-01", undefined, undefined, {
+            subject: "invoice March",
+          }),
+        ],
       },
       { path: "Sent", specialUse: "\\Sent", messages: [] },
       { path: "Drafts", specialUse: "\\Drafts", messages: [] },
@@ -573,7 +611,11 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     const fake = createFakeClient([
       {
         path: "INBOX",
-        messages: [message(1, "2026-01-01")],
+        messages: [
+          message(1, "2026-01-01", undefined, undefined, {
+            subject: "invoice January",
+          }),
+        ],
       },
       {
         path: "Labels",
@@ -589,7 +631,14 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
         specialUse: "\\Flagged",
         messages: [message(1, "2026-01-01")],
       },
-      { path: "Archive", messages: [message(10, "2026-04-01")] },
+      {
+        path: "Archive",
+        messages: [
+          message(10, "2026-04-01", undefined, undefined, {
+            subject: "invoice April",
+          }),
+        ],
+      },
     ]);
     connection.client = fake.client;
 
@@ -631,13 +680,34 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     const fake = createFakeClient([
       {
         path: "INBOX",
-        messages: [message(1, "2026-01-01"), message(2, "2026-03-01")],
+        messages: [
+          message(1, "2026-01-01", undefined, undefined, {
+            subject: "invoice January",
+          }),
+          message(2, "2026-03-01", undefined, undefined, {
+            subject: "invoice March",
+          }),
+        ],
       },
       {
         path: "Archive",
-        messages: [message(10, "2026-02-01"), message(11, "2026-04-01")],
+        messages: [
+          message(10, "2026-02-01", undefined, undefined, {
+            subject: "invoice February",
+          }),
+          message(11, "2026-04-01", undefined, undefined, {
+            subject: "invoice April",
+          }),
+        ],
       },
-      { path: "Sent", messages: [message(20, "2026-05-01")] },
+      {
+        path: "Sent",
+        messages: [
+          message(20, "2026-05-01", undefined, undefined, {
+            subject: "invoice May",
+          }),
+        ],
+      },
       {
         path: "Trash",
         specialUse: "\\Trash",
@@ -710,6 +780,92 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     expect(second.nextPageToken).toBeUndefined();
   });
 
+  // Live: Bridge answers `false` to the old `{and: [...]}` form, which read
+  // as an empty mailbox. Multi-term queries now use imapflow's native AND.
+  it("intersects multi-term queries instead of returning nothing", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-03-01", "alice@x", undefined, {
+            subject: "invoice March",
+          }),
+          message(2, "2026-02-01", "bob@x", undefined, {
+            subject: "invoice February",
+          }),
+          message(3, "2026-01-01", "alice@x", undefined, {
+            subject: "receipt January",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    expect(fake.client.search).not.toHaveBeenCalled();
+    const result = await new ImapProvider(config).getMessagesWithPagination({
+      query: "from:alice@x invoice",
+    });
+
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("INBOX", 1),
+    ]);
+    const sent = (
+      fake.client.search as unknown as { mock: { calls: unknown[][] } }
+    ).mock.calls.map((call) => call[0] as Record<string, unknown>);
+    expect(sent).not.toHaveLength(0);
+    for (const criteria of sent) expect(criteria).not.toHaveProperty("and");
+  });
+
+  it("ANDs two body phrases without the unsupported and operator", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-03-01", undefined, undefined, {
+            subject: "invoice receipt combined",
+          }),
+          message(2, "2026-02-01", undefined, undefined, {
+            subject: "invoice only",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getMessagesWithPagination({
+      query: "invoice receipt",
+    });
+
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("INBOX", 1),
+    ]);
+  });
+
+  it("filters has:attachment client-side on populated attachment metadata", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-03-01", undefined, undefined, {
+            subject: "invoice with file",
+            hasAttachment: true,
+          }),
+          message(2, "2026-02-01", undefined, undefined, {
+            subject: "invoice without file",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getMessagesWithPagination({
+      query: "has:attachment invoice",
+    });
+
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("INBOX", 1),
+    ]);
+  });
   // Live: Bridge UID order is append order, not date order, so a sequence
   // window repeated pages 2-4 and never returned the oldest UIDs.
   it("pages disjointly when UIDs are out of date order", async () => {
@@ -2048,7 +2204,14 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
     const fake = createFakeClient([
       {
         path: "INBOX",
-        messages: [message(1, "2026-01-01"), message(2, "2026-03-01")],
+        messages: [
+          message(1, "2026-01-01", undefined, undefined, {
+            subject: "invoice January",
+          }),
+          message(2, "2026-03-01", undefined, undefined, {
+            subject: "invoice March",
+          }),
+        ],
       },
       { path: "Archive", messages: [message(10, "2026-02-01")] },
     ]);

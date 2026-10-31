@@ -243,14 +243,26 @@ async function downloadMessageBody(
 }
 
 /**
- * Search messages in the currently selected mailbox.
+ * Search messages in the currently selected mailbox. A non-array result
+ * (Bridge answers `false` to queries it cannot run) is not "no hits": warn
+ * so it never reads as an empty mailbox.
  */
 export async function searchImapMessages(
   client: ImapFlow,
   criteria: Record<string, unknown>,
   maxResults?: number,
+  log?: { warn: (message: string, context?: Record<string, unknown>) => void },
 ): Promise<number[]> {
-  const uids = (await client.search(criteria, { uid: true })) || [];
+  const raw = await client.search(criteria, { uid: true });
+  if (!Array.isArray(raw)) {
+    log?.warn("IMAP SEARCH returned a non-array result", {
+      folder: client.mailbox?.path,
+      criteria,
+      result: raw,
+    });
+    return [];
+  }
+  const uids = raw;
 
   // UIDs are returned in ascending order; reverse for newest-first
   uids.reverse();
@@ -428,13 +440,34 @@ export function parseReferencesHeader(raw: Buffer): { references: string } {
 
 /**
  * Build an IMAP SEARCH criteria object from a simple query string.
+ *
+ * imapflow ANDs the keys of one object natively, so distinct terms merge
+ * into a single object (imapflow has no `and` operator: `{and: [...]}` used
+ * to compile to a bare UID SEARCH, which Bridge answers `false` to). A key
+ * repeated with different values (two body phrases) cannot merge, so the
+ * first stays in the query and the rest combine as De Morgan NOT/OR, which
+ * core IMAP supports. `is:seen`, `is:starred` map to flags; `has:attachment`
+ * cannot be SEARCHed (no BODYSTRUCTURE key in RFC 3501), so it comes back as
+ * a client-side filter flag instead of BODY text. Unknown `is:`/`has:`
+ * tokens are dropped, never body text.
  */
-export function parseSearchQuery(query: string): Record<string, unknown> {
-  const criteria: Record<string, unknown>[] = [];
+export function parseSearchQuery(query: string): {
+  criteria: Record<string, unknown>;
+  hasAttachment: boolean;
+} {
+  const merged: Record<string, unknown> = {};
+  const repeated: Record<string, unknown>[] = [];
+  let hasAttachment = false;
 
   // Quoted values (`subject:"weekly update"`) and bare phrases keep their
   // spaces; an unterminated quote swallows the rest of the query.
   const parts = query.match(/(\w+:"[^"]*"?|"[^"]*"?|\S+)/g) || [];
+
+  const addTerm = (term: Record<string, unknown>) => {
+    const key = Object.keys(term)[0];
+    if (key in merged) repeated.push(term);
+    else merged[key] = term[key];
+  };
 
   for (const part of parts) {
     const fieldMatch = part.match(/^(\w+):([\s\S]*)$/);
@@ -442,29 +475,46 @@ export function parseSearchQuery(query: string): Record<string, unknown> {
     const value = fieldMatch ? unquote(fieldMatch[2]) : part;
 
     if (part === "is:unread") {
-      criteria.push({ unseen: true });
-    } else if (part === "is:read") {
-      criteria.push({ seen: true });
+      addTerm({ unseen: true });
+    } else if (part === "is:read" || part === "is:seen") {
+      addTerm({ seen: true });
+    } else if (part === "is:starred" || part === "is:flagged") {
+      addTerm({ flagged: true });
     } else if (part === "has:attachment") {
-      criteria.push({ header: { "Content-Type": "multipart/mixed" } });
+      hasAttachment = true;
+    } else if (field === "is" || field === "has") {
+      // Unknown is:/has: token: drop, never body text.
     } else if (field === "from") {
-      criteria.push({ from: value });
+      addTerm({ from: value });
     } else if (field === "to") {
-      criteria.push({ to: value });
+      addTerm({ to: value });
     } else if (field === "subject") {
-      criteria.push({ subject: value });
+      addTerm({ subject: value });
     } else if (field === "since" || field === "after") {
-      criteria.push({ since: new Date(value) });
+      addTerm({ since: new Date(value) });
     } else if (field === "before") {
-      criteria.push({ before: new Date(value) });
+      addTerm({ before: new Date(value) });
     } else {
-      criteria.push({ body: unquote(part) });
+      addTerm({ body: unquote(part) });
     }
   }
 
-  if (criteria.length === 0) return { all: true };
-  if (criteria.length === 1) return criteria[0];
-  return { and: criteria };
+  // AND the repeats without an `and` operator: NOT (NOT a OR NOT b). Every
+  // term moves inside the NOT so none is asserted twice.
+  if (repeated.length > 0) {
+    const allTerms = [
+      ...Object.entries(merged).map(([key, val]) => ({ [key]: val })),
+      ...repeated,
+    ];
+    return {
+      criteria: { not: { or: allTerms.map((term) => ({ not: term })) } },
+      hasAttachment,
+    };
+  }
+
+  if (Object.keys(merged).length === 0)
+    return { criteria: { all: true }, hasAttachment };
+  return { criteria: merged, hasAttachment };
 }
 
 function unquote(value: string): string {
