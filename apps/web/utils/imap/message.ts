@@ -119,6 +119,43 @@ export async function fetchRecentMessages(
 }
 
 /**
+ * Fetch only UID + INTERNALDATE for a set of UIDs, newest-date-first ranking
+ * without pulling envelopes. UID order is append order, not date order, so
+ * listings rank the full match set by date first and fetch envelopes for
+ * the visible page only.
+ */
+export async function fetchInternalDatesByUids(
+  client: ImapFlow,
+  uids: number[],
+): Promise<Array<{ uid: number; time: number }>> {
+  if (uids.length === 0) return [];
+
+  const dated: Array<{ uid: number; time: number }> = [];
+  for (const uid of uids) {
+    try {
+      // Same WorkMail-compatible UID→sequence path as fetchMessagesByUids.
+      const seqNums =
+        (await client.search({ uid: `${uid}` }, { uid: false })) || [];
+      if (seqNums.length === 0) continue;
+      const msg = await client.fetchOne(String(seqNums[0]), {
+        uid: true,
+        internalDate: true,
+      });
+      if (!msg?.uid) continue;
+      dated.push({
+        uid: msg.uid,
+        time: msg.internalDate ? new Date(msg.internalDate).getTime() : 0,
+      });
+    } catch {
+      // A message that cannot be dated is left out of the ranking, like the
+      // envelope fetch below leaves out messages it cannot fetch.
+    }
+  }
+
+  return dated;
+}
+
+/**
  * Fetch multiple messages by UIDs - envelope only (no body).
  * Uses UID-based SEARCH to find each message's sequence number,
  * then fetches by sequence range (WorkMail-compatible).

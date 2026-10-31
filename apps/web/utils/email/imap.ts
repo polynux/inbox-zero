@@ -30,6 +30,7 @@ import { DraftNotFoundError, SafeError } from "@/utils/error";
 import { withImapConnection } from "@/utils/imap/client";
 import {
   convertImapMessage,
+  fetchInternalDatesByUids,
   fetchMessageByUid,
   fetchMessagesByUids,
   fetchRecentMessages,
@@ -183,14 +184,6 @@ export class ImapProvider implements EmailProvider {
 
       const maxResults = options.maxResults || 20;
       const offset = options.pageToken ? Number(options.pageToken) : 0;
-      // Fetch the newest window from every folder so the merged page is
-      // identical to the page a single global mailbox would return.
-      const window = offset + maxResults;
-      const simpleListing =
-        !options.query &&
-        !options.before &&
-        !options.after &&
-        !options.unreadOnly;
 
       const criteria: Record<string, unknown> = {};
       if (options.query) {
@@ -202,58 +195,43 @@ export class ImapProvider implements EmailProvider {
       if (options.after) criteria.since = options.after;
       if (options.unreadOnly) criteria.unseen = true;
 
-      const collected: ParsedMessage[] = [];
-      let hasMore = false;
-
+      // UID order is append order, which Bridge does not keep in date order:
+      // a sequence window (or slicing UIDs) repeats and skips pages. SEARCH
+      // the full match set, rank it by INTERNALDATE desc (UID desc tie-break)
+      // with one cheap fetch per match, then fetch envelopes for the page.
+      const ranked: Array<{ folder: string; uid: number; time: number }> = [];
       for (const folder of folders) {
-        const mailbox = await openFolderSkippingNo(client, folder);
-        if (!mailbox) continue;
-
-        // For simple listing without query, use sequence numbers (most reliable)
-        if (simpleListing) {
-          const total = mailbox.exists || 0;
-          if (total > window) hasMore = true;
-          if (total === 0) continue;
-
-          const start = Math.max(1, total - window + 1);
-          for await (const msg of client.fetch(`${start}:${total}`, {
-            uid: true,
-            envelope: true,
-            flags: true,
-            bodyStructure: true,
-            headers: ["references"],
-          })) {
-            const parsed = await convertImapMessage(
-              msg,
-              msg.headers?.length
-                ? parseReferencesHeader(msg.headers)
-                : undefined,
-              folder,
-              mailbox.specialUse,
-            );
-            if (parsed) collected.push(parsed);
-          }
-          continue;
-        }
-
-        // For queries, use IMAP SEARCH then fetch by UID
-        const allUids = await searchImapMessages(client, criteria);
-        if (allUids.length > window) hasMore = true;
-        const messages = await fetchMessagesByUids(
-          client,
-          allUids.slice(0, window),
-        );
-        collected.push(...messages);
+        if (!(await openFolderSkippingNo(client, folder))) continue;
+        const uids = await searchImapMessages(client, criteria);
+        const dated = await fetchInternalDatesByUids(client, uids);
+        for (const entry of dated) ranked.push({ folder, ...entry });
       }
+      ranked.sort((a, b) => b.time - a.time || b.uid - a.uid);
 
+      const page = ranked.slice(offset, offset + maxResults);
+      const collected: ParsedMessage[] = [];
+      // One folder open per folder on the page, not one per message.
+      const byFolder = new Map<string, number[]>();
+      for (const entry of page) {
+        const uids = byFolder.get(entry.folder) || [];
+        uids.push(entry.uid);
+        byFolder.set(entry.folder, uids);
+      }
+      // Preserve the page order: fetch per folder, then re-sort by rank.
+      const rank = new Map(page.map((entry, index) => [`${entry.folder}:${entry.uid}`, index]));
+      for (const [folder, uids] of byFolder) {
+        await client.mailboxOpen(folder, { readOnly: true });
+        collected.push(...(await fetchMessagesByUids(client, uids)));
+      }
       collected.sort(
-        (a, b) => new Date(b.date).getTime() - new Date(a.date).getTime(),
+        (a, b) =>
+          (rank.get(byFolderKeyOf(a.id)) ?? 0) -
+          (rank.get(byFolderKeyOf(b.id)) ?? 0),
       );
-      const messages = collected.slice(offset, offset + maxResults);
       const nextPageToken =
-        hasMore || collected.length > window ? String(window) : undefined;
+        offset + maxResults < ranked.length ? String(offset + maxResults) : undefined;
 
-      return { messages, nextPageToken };
+      return { messages: collected, nextPageToken };
     });
   }
 
@@ -292,15 +270,16 @@ export class ImapProvider implements EmailProvider {
     return this.withConnection(async (client) => {
       await client.mailboxOpen("INBOX", { readOnly: true });
       // Search for messages with attachments is not universally supported
-      // Fall back to text search
+      // Fall back to text search. UID order is append order, not date order:
+      // rank the full match set by INTERNALDATE desc, then page by offset so
+      // a filter miss on one page cannot strand later pages.
       const allUids = await searchImapMessages(client, { all: true });
-      const lastSeenUid = options.pageToken
-        ? Number(options.pageToken)
-        : undefined;
-      const remainingUids = lastSeenUid
-        ? allUids.filter((uid) => uid < lastSeenUid)
-        : allUids;
-      const pageUids = remainingUids.slice(0, options.maxResults || 20);
+      const dated = await fetchInternalDatesByUids(client, allUids);
+      dated.sort((a, b) => b.time - a.time || b.uid - a.uid);
+      const offset = options.pageToken ? Number(options.pageToken) : 0;
+      const pageUids = dated
+        .slice(offset, offset + (options.maxResults || 20))
+        .map((entry) => entry.uid);
 
       const messages = await fetchMessagesByUids(client, pageUids);
       // Filter client-side for messages with attachments
@@ -311,8 +290,8 @@ export class ImapProvider implements EmailProvider {
       return {
         messages: withAttachments,
         nextPageToken:
-          remainingUids.length > pageUids.length
-            ? String(pageUids[pageUids.length - 1])
+          offset + (options.maxResults || 20) < dated.length
+            ? String(offset + (options.maxResults || 20))
             : undefined,
       };
     });
@@ -417,13 +396,15 @@ export class ImapProvider implements EmailProvider {
   }): Promise<EmailThread[]> {
     return this.withConnection(async (client) => {
       await client.mailboxOpen(options.labelId, { readOnly: true });
-      const uids = await searchImapMessages(
-        client,
-        { all: true },
-        options.maxResults || 20,
-      );
-      const messages = await fetchMessagesByUids(client, uids);
-
+      // searchImapMessages caps newest UIDs, and UID order is append order:
+      // rank the full match set by INTERNALDATE desc, then fetch the page.
+      const uids = await searchImapMessages(client, { all: true });
+      const dated = await fetchInternalDatesByUids(client, uids);
+      dated.sort((a, b) => b.time - a.time || b.uid - a.uid);
+      const pageUids = dated
+        .slice(0, options.maxResults || 20)
+        .map((entry) => entry.uid);
+      const messages = await fetchMessagesByUids(client, pageUids);
       const threadMap = new Map<string, ParsedMessage[]>();
       for (const msg of messages) {
         const existing = threadMap.get(msg.threadId) || [];
@@ -927,12 +908,22 @@ export class ImapProvider implements EmailProvider {
       const sentFolder = await findSentFolder(client);
       if (!sentFolder) return [];
       await client.mailboxOpen(sentFolder, { readOnly: true });
-      const uids = await searchImapMessages(
-        client,
-        { all: true },
-        maxResults || 20,
+      // UIDs are append order, not date order: rank the full match set by
+      // INTERNALDATE desc (UID desc tie-break), then fetch the newest page.
+      const uids = await searchImapMessages(client, { all: true });
+      const dated = await fetchInternalDatesByUids(client, uids);
+      dated.sort((a, b) => b.time - a.time || b.uid - a.uid);
+      const pageUids = dated
+        .slice(0, maxResults || 20)
+        .map((entry) => entry.uid);
+      const messages = await fetchMessagesByUids(client, pageUids);
+      const order = new Map(pageUids.map((uid, index) => [uid, index]));
+      messages.sort(
+        (a, b) =>
+          (order.get(parseImapMessageId(a.id).uid) ?? 0) -
+          (order.get(parseImapMessageId(b.id).uid) ?? 0),
       );
-      return fetchMessagesByUids(client, uids);
+      return messages;
     });
   }
 
@@ -953,13 +944,25 @@ export class ImapProvider implements EmailProvider {
 
       const offset = options.pageToken ? Number(options.pageToken) : 0;
       const allUids = await searchImapMessages(client, criteria);
-      const pageUids = allUids.slice(offset, offset + options.maxResults);
+      // UID order is append order, not date order: rank by INTERNALDATE desc
+      // (UID desc tie-break) and offset into that ranking, like the listing.
+      const dated = await fetchInternalDatesByUids(client, allUids);
+      dated.sort((a, b) => b.time - a.time || b.uid - a.uid);
+      const pageUids = dated
+        .slice(offset, offset + options.maxResults)
+        .map((entry) => entry.uid);
       const messages = await fetchMessagesByUids(client, pageUids);
+      const order = new Map(pageUids.map((uid, index) => [uid, index]));
+      messages.sort(
+        (a, b) =>
+          (order.get(parseImapMessageId(a.id).uid) ?? 0) -
+          (order.get(parseImapMessageId(b.id).uid) ?? 0),
+      );
       const nextOffset = offset + options.maxResults;
       return {
         messages: messages.map((m) => ({ id: m.id, threadId: m.threadId })),
         nextPageToken:
-          nextOffset < allUids.length ? String(nextOffset) : undefined,
+          nextOffset < dated.length ? String(nextOffset) : undefined,
       };
     });
   }
@@ -1141,12 +1144,15 @@ ${messageContent}
       const draftsFolder = await findDraftsFolder(client);
       if (!draftsFolder) return [];
       await client.mailboxOpen(draftsFolder, { readOnly: true });
-      const uids = await searchImapMessages(
-        client,
-        { all: true },
-        options?.maxResults || 20,
-      );
-      const drafts = await fetchMessagesByUids(client, uids);
+      // searchImapMessages caps newest UIDs, and UID order is append order:
+      // rank the full match set by INTERNALDATE desc, then fetch the page.
+      const uids = await searchImapMessages(client, { all: true });
+      const dated = await fetchInternalDatesByUids(client, uids);
+      dated.sort((a, b) => b.time - a.time || b.uid - a.uid);
+      const pageUids = dated
+        .slice(0, options?.maxResults || 20)
+        .map((entry) => entry.uid);
+      const drafts = await fetchMessagesByUids(client, pageUids);
       return drafts.map((draft) => {
         const headerId = draft.headers["message-id"];
         if (!headerId) return draft;
@@ -2136,6 +2142,13 @@ async function openFolderSkippingNo(
     if (!isNoResponse(error)) throw error;
     return null;
   }
+}
+
+// Rank key for a fetched page member: the provider ids are folder-qualified
+// (`uid@base64url(folder)`), so decode back to the `folder:uid` rank key.
+function byFolderKeyOf(messageId: string): string {
+  const parsed = parseImapMessageId(messageId);
+  return `${parsed.folder}:${parsed.uid}`;
 }
 
 // MIME part ids in `convertImapMessage` come from the bodyStructure tree, so

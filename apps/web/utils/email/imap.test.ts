@@ -1,4 +1,3 @@
-import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImapProvider } from "@/utils/email/imap";
 import * as mailModule from "@/utils/imap/mail";
@@ -122,6 +121,9 @@ function createFakeClient(
   }
 
   function fetched(message: FakeMessage, query?: Record<string, unknown>) {
+    const wantsInternalDate = Boolean(
+      (query as { internalDate?: unknown } | undefined)?.internalDate,
+    );
     const bodyStructure = (query as { bodyStructure?: unknown } | undefined)
       ?.bodyStructure
       ? {
@@ -142,22 +144,25 @@ function createFakeClient(
       : undefined;
     return {
       uid: message.uid,
-      envelope: {
-        date: new Date(message.date),
-        subject: message.subject ?? `message ${message.uid}`,
-        from: [{ address: message.from ?? `${message.uid}@example.com` }],
-        to: message.to ? [{ address: message.to }] : [],
-        cc: message.cc ? [{ address: message.cc }] : [],
-        bcc: message.bcc ? [{ address: message.bcc }] : [],
-        messageId: message.messageId,
-        inReplyTo: message.inReplyTo,
-      },
-      flags: new Set<string>(),
-      headers: headersOf(message, query),
-      bodyStructure,
+      ...(wantsInternalDate
+        ? { internalDate: new Date(message.date) }
+        : {
+            envelope: {
+              date: new Date(message.date),
+              subject: message.subject ?? `message ${message.uid}`,
+              from: [{ address: message.from ?? `${message.uid}@example.com` }],
+              to: message.to ? [{ address: message.to }] : [],
+              cc: message.cc ? [{ address: message.cc }] : [],
+              bcc: message.bcc ? [{ address: message.bcc }] : [],
+              messageId: message.messageId,
+              inReplyTo: message.inReplyTo,
+            },
+            flags: new Set<string>(),
+            headers: headersOf(message, query),
+            bodyStructure,
+          }),
     };
   }
-
   function rawOf(message: FakeMessage): string {
     const lines = [
       `From: ${message.from ?? `${message.uid}@example.com`}`,
@@ -261,6 +266,7 @@ function createFakeClient(
         options?: { uid?: boolean },
       ) => {
         // Like download: a UID range resolves by UID, otherwise by position.
+        fetchQueries.push(query);
         const message = options?.uid
           ? current.messages.find((item) => item.uid === Number(range))
           : current.messages[Number(range) - 1];
@@ -387,7 +393,8 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
 
     const result = await new ImapProvider(config).getMessagesWithPagination({});
 
-    expect(fake.opened).toEqual(["INBOX"]);
+    expect(fake.opened).not.toHaveLength(0);
+    for (const folder of fake.opened) expect(folder).toBe("INBOX");
     expect(result.messages.map((m) => m.id)).toEqual([
       qualifiedId("INBOX", 2),
       qualifiedId("INBOX", 1),
@@ -402,8 +409,11 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
 
     await new ImapProvider(config).getMessagesWithPagination({});
 
-    expect(fake.fetchQueries.length).toBeGreaterThan(0);
-    for (const query of fake.fetchQueries) {
+    const envelopeQueries = fake.fetchQueries.filter(
+      (query) => query && "envelope" in query,
+    );
+    expect(envelopeQueries.length).toBeGreaterThan(0);
+    for (const query of envelopeQueries) {
       expect(query).toMatchObject({ bodyStructure: true });
     }
   });
@@ -435,6 +445,7 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       {},
     );
     for (const query of fake.fetchQueries) {
+      if (!query || !("envelope" in query)) continue;
       expect(query).toMatchObject({ headers: ["references"] });
     }
     const listedM2 = listing.messages.find((m) => m.subject === "message 3");
@@ -465,7 +476,7 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       query: "invoice",
     });
 
-    expect(fake.opened).toEqual(["All Mail"]);
+    expect([...new Set(fake.opened)]).toEqual(["All Mail"]);
     expect(result.messages.map((m) => m.id)).toEqual([
       qualifiedId("All Mail", 41),
       qualifiedId("All Mail", 40),
@@ -587,7 +598,7 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       query: "invoice",
     });
 
-    expect(fake.opened).toEqual(["INBOX", "Archive"]);
+    expect([...new Set(fake.opened)]).toEqual(["INBOX", "Archive"]);
     expect(result.messages.map((m) => m.id)).toEqual([
       qualifiedId("Archive", 10),
       qualifiedId("INBOX", 1),
@@ -655,7 +666,7 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       query: "invoice",
     });
 
-    expect(fake.opened).toEqual(["INBOX", "Archive", "Sent"]);
+    expect([...new Set(fake.opened)]).toEqual(["INBOX", "Archive", "Sent"]);
     expect(result.messages.map((m) => m.id)).toEqual([
       qualifiedId("Sent", 20),
       qualifiedId("Archive", 11),
@@ -697,6 +708,48 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     });
     expect(second.messages.map((m) => m.id)).toEqual([qualifiedId("INBOX", 1)]);
     expect(second.nextPageToken).toBeUndefined();
+  });
+
+  // Live: Bridge UID order is append order, not date order, so a sequence
+  // window repeated pages 2-4 and never returned the oldest UIDs.
+  it("pages disjointly when UIDs are out of date order", async () => {
+    const dates = [
+      "2026-09-01",
+      "2026-01-05",
+      "2026-08-01",
+      "2026-01-10",
+      "2026-07-01",
+      "2026-02-01",
+      "2026-06-01",
+      "2026-03-01",
+      "2026-05-01",
+      "2026-04-01",
+    ];
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: dates.map((date, index) => message(index + 1, date)),
+      },
+    ]);
+    connection.client = fake.client;
+
+    const seen: string[] = [];
+    let pageToken: string | undefined;
+    do {
+      const page = await new ImapProvider(config).getMessagesWithPagination({
+        maxResults: 3,
+        ...(pageToken ? { pageToken } : {}),
+      });
+      seen.push(...page.messages.map((m) => m.id));
+      pageToken = page.nextPageToken;
+    } while (pageToken);
+
+    // Every UID exactly once, newest-date-first overall.
+    expect(seen).toHaveLength(10);
+    expect(new Set(seen).size).toBe(10);
+    expect(seen).toEqual(
+      [1, 3, 5, 7, 9, 10, 8, 6, 4, 2].map((uid) => qualifiedId("INBOX", uid)),
+    );
   });
 });
 
@@ -1119,16 +1172,16 @@ describe("ImapProvider.getMessagesWithAttachments pagination", () => {
     connection.client = null;
   });
 
-  it("pages through UID windows instead of refetching the newest messages", async () => {
+  it("pages disjointly by date offset instead of refetching the newest messages", async () => {
     const fake = createFakeClient([
       {
         path: "INBOX",
         messages: [
-          message(1, "2026-01-01"),
-          message(2, "2026-02-01"),
-          message(3, "2026-03-01"),
-          message(4, "2026-04-01"),
-          message(5, "2026-05-01"),
+          message(1, "2026-05-01", undefined, undefined, { hasAttachment: true }),
+          message(2, "2026-01-01", undefined, undefined, { hasAttachment: true }),
+          message(3, "2026-04-01", undefined, undefined, { hasAttachment: true }),
+          message(4, "2026-02-01", undefined, undefined, { hasAttachment: true }),
+          message(5, "2026-03-01", undefined, undefined, { hasAttachment: true }),
         ],
       },
     ]);
@@ -1137,23 +1190,32 @@ describe("ImapProvider.getMessagesWithAttachments pagination", () => {
     const first = await new ImapProvider(config).getMessagesWithAttachments({
       maxResults: 3,
     });
-    expect(fake.fetchedUids).toEqual([5, 4, 3]);
     expect(first.nextPageToken).toBe("3");
+    expect(first.messages.map((m) => m.id)).toEqual([
+      qualifiedId("INBOX", 1),
+      qualifiedId("INBOX", 3),
+      qualifiedId("INBOX", 5),
+    ]);
 
-    fake.fetchedUids.length = 0;
     const second = await new ImapProvider(config).getMessagesWithAttachments({
       maxResults: 3,
       pageToken: first.nextPageToken,
     });
-    expect(fake.fetchedUids).toEqual([2, 1]);
     expect(second.nextPageToken).toBeUndefined();
+    expect(second.messages.map((m) => m.id)).toEqual([
+      qualifiedId("INBOX", 4),
+      qualifiedId("INBOX", 2),
+    ]);
   });
 
   it("returns no next page token when the window covers every message", async () => {
     const fake = createFakeClient([
       {
         path: "INBOX",
-        messages: [message(1, "2026-01-01"), message(2, "2026-02-01")],
+        messages: [
+          message(1, "2026-01-01", undefined, undefined, { hasAttachment: true }),
+          message(2, "2026-02-01", undefined, undefined, { hasAttachment: true }),
+        ],
       },
     ]);
     connection.client = fake.client;
@@ -1162,7 +1224,10 @@ describe("ImapProvider.getMessagesWithAttachments pagination", () => {
       maxResults: 3,
     });
 
-    expect(fake.fetchedUids).toEqual([2, 1]);
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("INBOX", 2),
+      qualifiedId("INBOX", 1),
+    ]);
     expect(result.nextPageToken).toBeUndefined();
   });
 });
