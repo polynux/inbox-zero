@@ -323,6 +323,35 @@ describe("pollImapAccount", () => {
     expect(cursors).toEqual([5, 5, 6, 6, 6]);
   });
 
+  it("clears failure strikes when UIDVALIDITY resets the cursor", async () => {
+    setCursor(3, 42n);
+    state.mailboxOverride = { uidNext: 6, uidValidity: 42n };
+    state.processHook = async (messageId) => {
+      if (messageId === encodeImapMessageId("INBOX", 4))
+        throw new Error("processing failed");
+    };
+
+    await pollImapAccount("email-account-1");
+    await pollImapAccount("email-account-1");
+    expect(state.credential?.pollFailureUid).toBe(4);
+    expect(state.credential?.pollFailureCount).toBe(2);
+
+    state.mailboxOverride = { uidNext: 6, uidValidity: 43n };
+    await pollImapAccount("email-account-1");
+    expect(state.credential?.lastSeenUid).toBe(5);
+    expect(state.credential?.pollFailureUid).toBeNull();
+    expect(state.credential?.pollFailureCount).toBe(0);
+
+    // The renumbered mailbox delivers a fresh UID 4; one failure must not be
+    // the third strike that skips it.
+    state.credential!.lastSeenUid = 3;
+    await pollImapAccount("email-account-1");
+
+    expect(state.credential?.pollFailureUid).toBe(4);
+    expect(state.credential?.pollFailureCount).toBe(1);
+    expect(state.credential?.lastSeenUid).toBe(3);
+  });
+
   it("advances the cursor per handled message so a stopped run is not replayed", async () => {
     setCursor(5);
     state.mailboxUids = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -431,6 +460,19 @@ describe("pollImapAccount", () => {
       newMessages: 0,
     });
     expect(state.credential?.lastSeenUid).toBe(5);
+  });
+
+  it("clears failure strikes when a first poll baselines the cursor", async () => {
+    setCursor(null, 42n);
+    state.credential!.pollFailureUid = 4;
+    state.credential!.pollFailureCount = 2;
+    state.mailboxOverride = { uidNext: 6, uidValidity: 42n };
+
+    await pollImapAccount("email-account-1");
+
+    expect(state.credential?.lastSeenUid).toBe(5);
+    expect(state.credential?.pollFailureUid).toBeNull();
+    expect(state.credential?.pollFailureCount).toBe(0);
   });
 
   it("keeps the baseline unset when the server omits UIDNEXT", async () => {

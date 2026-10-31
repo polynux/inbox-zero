@@ -108,6 +108,8 @@ export async function pollImapAccount(
           data: {
             ...(uidNext == null ? {} : { lastSeenUid: uidNext - 1 }),
             ...uidValidityUpdate,
+            pollFailureUid: null,
+            pollFailureCount: 0,
             lastPolledAt: new Date(),
           },
         });
@@ -132,6 +134,8 @@ export async function pollImapAccount(
           data: {
             ...(uidNext == null ? {} : { lastSeenUid: uidNext - 1 }),
             ...uidValidityUpdate,
+            pollFailureUid: null,
+            pollFailureCount: 0,
             lastPolledAt: new Date(),
           },
         });
