@@ -1580,8 +1580,12 @@ ${messageContent}
         await client.mailboxOpen(folder);
         try {
           await moveMessageToFolder(client, uid, trashFolder);
-        } catch {
-          this.logger.warn("IMAP trashMessages move failed", { messageId });
+        } catch (error) {
+          this.logger.warn("IMAP trashMessages move failed", {
+            messageId,
+            error,
+          });
+          throw error;
         }
       }
     });
@@ -1620,18 +1624,14 @@ ${messageContent}
           continue;
         }
         await client.mailboxOpen(folder);
-        try {
-          if (read) {
-            await client.messageFlagsAdd(String(uid), ["\\Seen"], {
-              uid: true,
-            });
-          } else {
-            await client.messageFlagsRemove(String(uid), ["\\Seen"], {
-              uid: true,
-            });
-          }
-        } catch {
-          this.logger.warn("IMAP markMessagesReadState failed", { messageId });
+        if (read) {
+          await client.messageFlagsAdd(String(uid), ["\\Seen"], {
+            uid: true,
+          });
+        } else {
+          await client.messageFlagsRemove(String(uid), ["\\Seen"], {
+            uid: true,
+          });
         }
       }
     });
@@ -1652,19 +1652,13 @@ ${messageContent}
           continue;
         }
         await client.mailboxOpen(folder);
-        try {
-          if (starred) {
-            await client.messageFlagsAdd(String(uid), ["\\Flagged"], {
-              uid: true,
-            });
-          } else {
-            await client.messageFlagsRemove(String(uid), ["\\Flagged"], {
-              uid: true,
-            });
-          }
-        } catch {
-          this.logger.warn("IMAP markMessagesStarredState failed", {
-            messageId,
+        if (starred) {
+          await client.messageFlagsAdd(String(uid), ["\\Flagged"], {
+            uid: true,
+          });
+        } else {
+          await client.messageFlagsRemove(String(uid), ["\\Flagged"], {
+            uid: true,
           });
         }
       }

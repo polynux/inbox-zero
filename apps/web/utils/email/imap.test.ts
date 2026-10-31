@@ -1822,6 +1822,39 @@ describe("ImapProvider starring", () => {
       { uid: 1, folder: "Archive", flag: "\\Flagged" },
     ]);
   });
+  it("markMessagesStarredState surfaces a flag failure instead of swallowing it", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    fake.client.messageFlagsAdd = vi.fn(async () => {
+      throw new Error("mailbox is read-only");
+    });
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).markMessagesStarredState(
+        [qualifiedId("INBOX", 1)],
+        true,
+      ),
+    ).rejects.toThrow(/read-only/);
+  });
+
+  it("markMessagesReadState surfaces a flag failure instead of swallowing it", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    fake.client.messageFlagsAdd = vi.fn(async () => {
+      throw new Error("mailbox is read-only");
+    });
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).markMessagesReadState(
+        [qualifiedId("INBOX", 1)],
+        true,
+      ),
+    ).rejects.toThrow(/read-only/);
+  });
 });
 
 describe("ImapProvider restore paths", () => {
