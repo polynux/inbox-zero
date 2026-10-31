@@ -367,6 +367,86 @@ describe("createEmailProviderMailboxSource", () => {
     });
     expect(getFolders).toHaveBeenCalled();
   });
+  it("exposes IMAP folders as sync scopes behind the primary account scope", async () => {
+    const getFolders = vi.fn().mockResolvedValue([
+      {
+        id: "Archive",
+        displayName: "Archive",
+        systemType: "ARCHIVE",
+        childFolders: [],
+      },
+      {
+        id: "Work",
+        displayName: "Work",
+        childFolders: [],
+      },
+    ]);
+    const source = createEmailProviderMailboxSource({
+      accountId: "acc-1",
+      provider: {
+        name: "imap",
+        localMailSyncStrategy: "folder-delta",
+        getFolders,
+      } as unknown as EmailProvider,
+    });
+    const result = await source.discoverScopes({
+      session: { accountId: "acc-1", generation: "g1" },
+      requestId: "r1",
+      page: null,
+      signal: new AbortController().signal,
+    });
+    expect(result).toEqual({
+      status: "ok",
+      value: {
+        scopes: [
+          { id: "primary", kind: "account", folderId: null },
+          {
+            id: "Archive",
+            kind: "folder",
+            folderId: "Archive",
+            priority: "high",
+          },
+          { id: "Work", kind: "folder", folderId: "Work", priority: "low" },
+        ],
+        nextPage: null,
+      },
+    });
+  });
+
+  it("reads an IMAP folder stream from its folder cursor", async () => {
+    const getMailboxSyncPage = vi.fn(async () => ({
+      cursor: "archive-cursor",
+      reset: false,
+      upsertedMessages: [],
+      deletedMessageIds: [],
+      hasMore: false,
+    }));
+    const source = createEmailProviderMailboxSource({
+      accountId: "acc-1",
+      provider: {
+        name: "imap",
+        localMailSyncStrategy: "folder-delta",
+        getMailboxSyncPage,
+      } as unknown as EmailProvider,
+    });
+    const result = await source.readChanges({
+      session: { accountId: "acc-1", generation: "g1" },
+      requestId: "r1",
+      position: {
+        streamId: "Archive",
+        generation: "g1",
+        checkpoint: null,
+      },
+      pageSize: 20,
+      signal: new AbortController().signal,
+    });
+    expect(getMailboxSyncPage).toHaveBeenCalledWith({
+      cursor: undefined,
+      folderId: "Archive",
+      limit: 20,
+    });
+    expect(result.status).toBe("page");
+  });
 
   it("enumerates an Outlook folder scope and starts catch-up from its folder cursor", async () => {
     const getMailboxSyncPage = vi.fn().mockResolvedValue({

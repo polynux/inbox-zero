@@ -11,6 +11,7 @@ import {
   isProtonBridgeLayoutInList,
   labelNameFromPath,
   labelPathFromName,
+  listFoldersAsOutlookFolders,
   listLabelMailboxes,
 } from "@/utils/imap/folder";
 
@@ -155,6 +156,21 @@ describe("findTrashFolder", () => {
   it("returns null when the LIST result has no trash mailbox", async () => {
     const { client } = mockClient([mailbox("INBOX"), mailbox("Archive")]);
     await expect(findTrashFolder(client)).resolves.toBeNull();
+  });
+});
+describe("listFoldersAsOutlookFolders", () => {
+  it("tags special-use folders as system types for sync scope priority", async () => {
+    const { client } = mockClient([
+      mailbox("INBOX", "\\Inbox"),
+      mailbox("Archive", "\\Archive"),
+      mailbox("Work"),
+    ]);
+    const folders = await listFoldersAsOutlookFolders(client);
+    expect(folders.map((folder) => [folder.id, folder.systemType])).toEqual([
+      ["INBOX", "INBOX"],
+      ["Archive", "ARCHIVE"],
+      ["Work", undefined],
+    ]);
   });
 });
 

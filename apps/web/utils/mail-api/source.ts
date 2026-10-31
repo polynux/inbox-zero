@@ -92,6 +92,22 @@ export function createEmailProviderMailboxSource(input: {
           },
         };
       }
+      if (provider.name === "imap") {
+        // Archived/Trash catch-up runs one delta stream per special-use
+        // folder, like Outlook's per-folder scopes; the primary stream keeps
+        // serving INBOX.
+        const folders = await provider.getFolders();
+        return {
+          status: "ok",
+          value: {
+            scopes: [
+              { id: "primary", kind: "account", folderId: null },
+              ...flattenFolderScopes(folders),
+            ],
+            nextPage: null,
+          },
+        };
+      }
       return {
         status: "ok",
         value: {
@@ -190,11 +206,16 @@ export function createEmailProviderMailboxSource(input: {
     },
     async readChanges({ position, session, requestId, pageSize }) {
       try {
+        const scopeForStream: ScopeDescriptor = {
+          id: position.streamId,
+          kind: "folder",
+          folderId: position.streamId,
+        };
         const page = await provider.getMailboxSyncPage({
           cursor: position.checkpoint || undefined,
           folderId:
-            provider.name === "microsoft" && position.streamId !== "primary"
-              ? position.streamId
+            position.streamId !== "primary"
+              ? (scopedFolderId(provider, scopeForStream) ?? position.streamId)
               : undefined,
           limit: pageSize,
         });

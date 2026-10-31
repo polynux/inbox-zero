@@ -36,7 +36,30 @@ export async function listFoldersAsOutlookFolders(
     childFolderCount: 0,
     unreadItemCount: 0,
     totalItemCount: 0,
+    systemType: imapSystemType(mb.specialUse, mb.path),
   }));
+}
+
+// Sync scopes prioritize special-use folders the way Outlook prioritizes
+// system folders, so Archive/Trash catch-up isn't stuck behind user folders.
+function imapSystemType(
+  specialUse: string | undefined,
+  path: string,
+): OutlookFolder["systemType"] {
+  if (specialUse === "\\Archive") return "ARCHIVE";
+  if (specialUse === "\\Trash") return "TRASH";
+  if (specialUse === "\\Junk") return "SPAM";
+  if (specialUse === "\\Sent") return "SENT";
+  if (specialUse === "\\Drafts") return "DRAFT";
+  if (specialUse === "\\Inbox") return "INBOX";
+  const leaf = path.split(/[/.]/).pop()?.toLowerCase() ?? "";
+  if (leaf === "archive") return "ARCHIVE";
+  if (leaf === "trash" || leaf === "deleted items" || leaf === "deleted")
+    return "TRASH";
+  if (leaf === "junk" || leaf === "spam") return "SPAM";
+  if (leaf === "sent") return "SENT";
+  if (leaf === "drafts" || leaf === "draft") return "DRAFT";
+  return;
 }
 
 function convertMailboxToLabel(mailbox: ListResponse): EmailLabel {
