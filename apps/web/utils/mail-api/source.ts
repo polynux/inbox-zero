@@ -158,6 +158,9 @@ export function createEmailProviderMailboxSource(input: {
           folderId: token.folderId ?? undefined,
           pageToken: token.pageToken,
           includeDrafts: true,
+          // Bootstrap only needs recent mail: bound the provider scan to the
+          // bootstrap window instead of the whole mailbox.
+          ...(token.afterMs ? { after: new Date(token.afterMs) } : {}),
         });
         const { changes, requiredHydration, bodies } = enumeratedObservations(
           accountId,

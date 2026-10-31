@@ -849,6 +849,43 @@ describe("createEmailProviderMailboxSource", () => {
     });
   });
 
+  it("bounds enumeration to the bootstrap window", async () => {
+    const getMessagesWithPagination = vi.fn().mockResolvedValue({
+      messages: [],
+    });
+    const source = createEmailProviderMailboxSource({
+      accountId: "acc-1",
+      provider: {
+        name: "imap",
+        getMessagesWithPagination,
+        async getMailboxSyncPage() {
+          return {
+            cursor: "imap-cursor",
+            reset: true,
+            upsertedMessages: [],
+            deletedMessageIds: [],
+            hasMore: false,
+          };
+        },
+      } as unknown as EmailProvider,
+    });
+    await source.enumerate({
+      session: { accountId: "acc-1", generation: "g1" },
+      requestId: "r1",
+      signal: new AbortController().signal,
+      bootstrapId: "mailbox",
+      page: JSON.stringify({ afterMs: 1_700_000_000_000, scopeId: "primary" }),
+      pageSize: 50,
+    });
+    expect(getMessagesWithPagination).toHaveBeenCalledWith({
+      maxResults: 50,
+      folderId: undefined,
+      pageToken: undefined,
+      includeDrafts: true,
+      after: new Date(1_700_000_000_000),
+    });
+  });
+
   it("advertises and uses the Outlook list page size for Microsoft enumeration", async () => {
     const getMessagesWithPagination = vi.fn().mockResolvedValue({
       messages: [],
