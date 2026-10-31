@@ -64,7 +64,43 @@ describe("getRootMessageId", () => {
     const result = getRootMessageId(undefined, undefined, undefined);
     expect(result).toBe("fallback");
   });
+
+  // Proton Bridge injects `<…@protonmail.internalid>` delivery ids into
+  // References: the parent's own References and the reply's both start with
+  // one, so rooting on the first token would split the thread.
+  it("ignores Proton internal ids when computing the root", () => {
+    const parentRoot = getRootMessageId(
+      "<1ehgou==@protonmail.internalid>",
+      undefined,
+      "<33bc@proton.me>",
+    );
+    const replyRoot = getRootMessageId(
+      "<33bc@proton.me> <96tJ@protonmail.internalid>",
+      "<33bc@proton.me>",
+      "<reply@proton.me>",
+    );
+    expect(parentRoot).toBe("33bc@proton.me");
+    expect(replyRoot).toBe("33bc@proton.me");
+    expect(
+      buildThreadId(
+        "<33bc@proton.me> <96tJ@protonmail.internalid>",
+        "<33bc@proton.me>",
+        "<reply@proton.me>",
+      ),
+    ).toBe(buildThreadId(undefined, undefined, "<33bc@proton.me>"));
+  });
+
+  it("keeps the own id when References holds only the Proton internal id", () => {
+    expect(
+      getRootMessageId(
+        "<abc@protonmail.internalid>",
+        undefined,
+        "<abc@protonmail.internalid>",
+      ),
+    ).toBe("abc@protonmail.internalid");
+  });
 });
+
 describe("buildThreadId with a fallback key", () => {
   const inboxOne = encodeImapMessageId("INBOX", 1);
   const inboxTwo = encodeImapMessageId("INBOX", 2);

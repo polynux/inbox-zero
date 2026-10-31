@@ -2394,6 +2394,52 @@ describe("ImapProvider thread id agreement across listing, getMessage and thread
     expect(moved).toEqual([{ uid: 2, to: "Archive", from: "Sent" }]);
     expect(mailboxesOf(fake).Sent).toEqual([]);
   });
+
+  it("keeps one thread for Proton's split copies: parent INBOX+Sent, reply Sent+INBOX", async () => {
+    const parentId = "<33bc@proton.me>";
+    const parentThreadId = buildThreadId(undefined, undefined, parentId);
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(7, "2026-10-30", "me@proton.me", "them@x", {
+            messageId: parentId,
+            references: "<1ehgou==@protonmail.internalid>",
+          }),
+          message(9, "2026-10-31", "them@x", "me@proton.me", {
+            messageId: "<reply@proton.me>",
+            inReplyTo: parentId,
+            references: `${parentId} <96tJ@protonmail.internalid>`,
+          }),
+        ],
+      },
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [
+          message(5, "2026-10-30", "me@proton.me", "them@x", {
+            messageId: parentId,
+          }),
+          message(6, "2026-10-31", "me@proton.me", "them@x", {
+            messageId: "<reply@proton.me>",
+            inReplyTo: parentId,
+            references: `${parentId} <96tJ@protonmail.internalid>`,
+          }),
+        ],
+      },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+    ]);
+    connection.client = fake.client;
+
+    const threads = await new ImapProvider(config).getMessagesWithPagination(
+      {},
+    );
+    const ids = new Set(threads.messages.map((m) => m.threadId));
+    expect(ids).toEqual(new Set([parentThreadId]));
+
+    const resolved = await new ImapProvider(config).getThread(parentThreadId);
+    expect(resolved.messages).toHaveLength(4);
+  });
 });
 
 describe("ImapProvider Proton label edge cases", () => {

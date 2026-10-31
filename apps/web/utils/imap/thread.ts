@@ -65,6 +65,21 @@ export function parseThreadRootMessageId(threadId: string): string | null {
   return root;
 }
 
+// Proton Bridge injects its own `<…@protonmail.internalid>` ids into
+// References on delivery (both the parent's and the reply's), so the first
+// References token is a delivery artifact, not the thread root: skip those
+// tokens when they are not the message's own id.
+const PROTON_INTERNALID_DOMAIN = "protonmail.internalid";
+
+function withoutProtonInternalIds(ids: string[], ownId?: string): string[] {
+  const own = ownId?.replace(/^<|>$/g, "").trim().toLowerCase();
+  return ids.filter((id) => {
+    const normalized = id.replace(/^<|>$/g, "").trim().toLowerCase();
+    if (normalized === own) return true;
+    return !normalized.endsWith(`@${PROTON_INTERNALID_DOMAIN}`);
+  });
+}
+
 /**
  * Extract the root message ID from threading headers.
  * The References header lists Message-IDs oldest-first,
@@ -75,13 +90,15 @@ export function getRootMessageId(
   inReplyTo: string | undefined,
   messageId: string | undefined,
 ): string {
+  const ownIds = messageId ? parseMessageIdList(messageId) : [];
+  const ownId = ownIds.length > 0 ? ownIds[0] : undefined;
   if (references) {
-    const ids = parseMessageIdList(references);
+    const ids = withoutProtonInternalIds(parseMessageIdList(references), ownId);
     if (ids.length > 0) return ids[0];
   }
 
   if (inReplyTo) {
-    const ids = parseMessageIdList(inReplyTo);
+    const ids = withoutProtonInternalIds(parseMessageIdList(inReplyTo), ownId);
     if (ids.length > 0) return ids[0];
   }
 
