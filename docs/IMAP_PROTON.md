@@ -72,6 +72,38 @@ host, since the password would cross the network in the clear.
    Mailpit on 1025) or bump Bridge's ports in Settings → Advanced settings
    → Default ports → Change, then match the ports in the form.
 
+## Running Bridge in Docker
+
+`docker/proton-bridge/docker-compose.yml` runs
+[`shenxn/protonmail-bridge`](https://github.com/shenxn/protonmail-bridge-docker),
+which packages the official Bridge `.deb` and tracks upstream releases (pinned
+to `3.27.1`, the latest Bridge release). Ports are bound to loopback only:
+IMAP `127.0.0.1:1143`, SMTP `127.0.0.1:1026` (not 1025, which Mailpit
+commonly holds).
+
+```sh
+# one-time, interactive (supports 2FA)
+docker compose -f docker/proton-bridge/docker-compose.yml run --rm proton-bridge init
+#   bridge> login      # Proton credentials + 2FA
+#   bridge> info       # copy the Bridge username/password
+#   bridge> exit       # then Ctrl+C if the container doesn't stop
+docker compose -f docker/proton-bridge/docker-compose.yml up -d
+```
+
+In the Add IMAP Account form, pick the `ProtonMail Bridge` preset and change
+the SMTP port to `1026`. Bridge's self-signed certificate is accepted because
+the host is loopback and `IMAP_ALLOW_PRIVATE_HOSTS=true`.
+
+Probe it before linking:
+
+```sh
+cd apps/web
+IMAP_ALLOW_PRIVATE_HOSTS=true \
+IMAP_HOST=127.0.0.1 IMAP_PORT=1143 IMAP_USER=<bridge user> IMAP_PASS=<bridge password> \
+SMTP_HOST=127.0.0.1 SMTP_PORT=1026 \
+pnpm exec tsx scripts/imap-probe.ts
+```
+
 ## Upgrading from bare-UID ids
 
 Older builds used a bare UID as an IMAP message id and

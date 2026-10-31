@@ -1,0 +1,24 @@
+# Proton Mail Bridge for local IMAP testing. See docs/IMAP_PROTON.md.
+#
+# shenxn/protonmail-bridge packages the official Bridge .deb and tracks
+# upstream releases. Pin the tag so a Bridge upgrade is a deliberate change.
+#
+# One-time login (interactive, handles 2FA):
+#   docker compose -f docker/proton-bridge/docker-compose.yml run --rm proton-bridge init
+#   then in the Bridge shell: `login`, then `info` (copy the Bridge password), then `exit`.
+# Run:
+#   docker compose -f docker/proton-bridge/docker-compose.yml up -d
+services:
+  proton-bridge:
+    image: shenxn/protonmail-bridge:3.27.1
+    restart: unless-stopped
+    ports:
+      # Loopback only, like the desktop Bridge. SMTP is on 1026 because
+      # 1025 is commonly taken by Mailpit; IMAP keeps Bridge's default 1143.
+      - "127.0.0.1:1143:143/tcp"
+      - "127.0.0.1:1026:25/tcp"
+    volumes:
+      - proton-bridge:/root
+
+volumes:
+  proton-bridge:
