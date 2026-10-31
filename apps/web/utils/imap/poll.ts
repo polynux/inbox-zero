@@ -252,8 +252,9 @@ export async function pollImapAccount(
                 emailAccountId,
                 messageId,
               });
+            } else {
+              newMessages++;
             }
-            newMessages++;
           }
         } catch (error) {
           // Strikes are persisted: a poll is a fresh invocation (serverless or

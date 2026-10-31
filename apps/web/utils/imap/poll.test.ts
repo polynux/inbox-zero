@@ -26,6 +26,8 @@ const { state, prismaFake } = vi.hoisted(() => {
     fromAddress: "news@example.com",
     labelIds: ["INBOX", "UNREAD"] as string[],
     validationFails: false,
+    redisConfigured: false,
+    lockSkipped: false,
   };
 
   const prismaFake = {
@@ -144,6 +146,7 @@ vi.mock("@/utils/redis/message-processing", () => ({
     _key: unknown,
     fn: () => Promise<unknown>,
   ) => {
+    if (state.lockSkipped) return { skipped: true };
     await fn();
     return { skipped: false };
   },
@@ -183,7 +186,14 @@ vi.mock("@/utils/webhook/validate-webhook-account", () => ({
         },
 }));
 vi.mock("@/env", () => ({
-  env: { REDIS_HTTP_URL: undefined, REDIS_HTTP_TOKEN: undefined },
+  env: {
+    get REDIS_HTTP_URL() {
+      return state.redisConfigured ? "http://redis.test" : undefined;
+    },
+    get REDIS_HTTP_TOKEN() {
+      return state.redisConfigured ? "token" : undefined;
+    },
+  },
 }));
 
 import {
@@ -217,6 +227,8 @@ beforeEach(() => {
   state.fromAddress = "news@example.com";
   state.labelIds = ["INBOX", "UNREAD"];
   state.validationFails = false;
+  state.redisConfigured = false;
+  state.lockSkipped = false;
   setCursor(null);
 });
 
@@ -386,6 +398,19 @@ describe("pollImapAccount", () => {
     expect(state.processed.filter((id) => id === "6@SU5CT1g")).toHaveLength(1);
     expect(first.newMessages + second.newMessages).toBe(1);
     expect(state.credential?.pollLockedUntil).toBeNull();
+  });
+
+  it("does not count a message another run holds the lock for", async () => {
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6];
+    state.redisConfigured = true;
+    state.lockSkipped = true;
+
+    const result = await pollImapAccount("email-account-1");
+
+    expect(result.newMessages).toBe(0);
+    expect(state.processed).toEqual([]);
+    expect(state.credential?.lastSeenUid).toBe(6);
   });
 
   it("resumes after an expired claim", async () => {
