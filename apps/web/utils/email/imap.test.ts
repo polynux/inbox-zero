@@ -1706,13 +1706,54 @@ describe("ImapProvider attachments", () => {
     ).rejects.toThrow();
     expect(fake.client.download).not.toHaveBeenCalled();
   });
+
+  it("sendEmailWithHtml marks base64 attachments so bytes survive SMTP", async () => {
+    const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
+    connection.client = fake.client;
+    // Bytes that are not valid UTF-8: sent as text they corrupt, decoded
+    // from base64 they round-trip.
+    const original = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a]);
+    const sent: Array<Record<string, unknown>> = [];
+    const sendSpy = vi
+      .spyOn(mailModule, "sendSmtpEmail")
+      .mockImplementation(async (_config, options) => {
+        sent.push(options as Record<string, unknown>);
+        return { messageId: "<smtp-sent@example.com>" };
+      });
+    try {
+      await new ImapProvider(config).sendEmailWithHtml({
+        to: "friend@example.com",
+        subject: "photo",
+        messageHtml: "<p>see attached</p>",
+        attachments: [
+          {
+            filename: "photo.jpg",
+            content: original.toString("base64"),
+            contentType: "image/jpeg",
+          },
+        ],
+      });
+
+      expect(sent).toHaveLength(1);
+      const attachments = sent[0]?.attachments as Array<{
+        encoding: string;
+        content: string;
+      }>;
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0]?.encoding).toBe("base64");
+      expect(
+        Buffer.from(attachments[0]?.content ?? "", "base64").equals(original),
+      ).toBe(true);
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
 });
 
 describe("ImapProvider starring", () => {
   beforeEach(() => {
     connection.client = null;
   });
-
   it("starMessage adds \\Flagged in the message's own folder without moving it", async () => {
     const fake = createFakeClient([
       {

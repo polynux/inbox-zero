@@ -74,6 +74,7 @@ import {
   saveDraft,
 } from "@/utils/imap/draft";
 import { sendSmtpEmail } from "@/utils/imap/mail";
+import { toMailerAttachments } from "@/utils/types/mail";
 import {
   buildThreadId,
   parseFallbackThreadId,
@@ -1103,7 +1104,9 @@ export class ImapProvider implements EmailProvider {
       replyTo: body.replyTo,
       inReplyTo: body.replyToEmail?.headerMessageId,
       references: body.replyToEmail?.references,
-      attachments: body.attachments,
+      // Base64 content strings need `encoding: "base64"` or nodemailer sends
+      // them as UTF-8 text; the Gmail/Microsoft providers use the same helper.
+      attachments: toMailerAttachments(body.attachments),
     });
 
     const threadId =
