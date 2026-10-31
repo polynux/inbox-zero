@@ -64,7 +64,7 @@ export async function pollImapAccount(
         where: {
           account: { emailAccount: { id: emailAccountId } },
         },
-        select: { id: true, lastSeenUid: true },
+        select: { id: true, lastSeenUid: true, uidValidity: true },
       });
 
       if (!credential) {
@@ -73,6 +73,10 @@ export async function pollImapAccount(
 
       const uidNext =
         mailbox.uidNext === undefined ? null : Number(mailbox.uidNext);
+      const uidValidity =
+        mailbox.uidValidity === undefined ? null : BigInt(mailbox.uidValidity);
+      const uidValidityUpdate = uidValidity == null ? {} : { uidValidity };
+
       // First poll (null cursor): baseline only, report 0 new. The whole
       // mailbox predates linking, so reporting it all as new would archive
       // or process years of history on first run. A server that omits
@@ -82,6 +86,31 @@ export async function pollImapAccount(
           where: { id: credential.id },
           data: {
             ...(uidNext == null ? {} : { lastSeenUid: uidNext - 1 }),
+            ...uidValidityUpdate,
+            lastPolledAt: new Date(),
+          },
+        });
+        return { newMessages: 0 };
+      }
+
+      // A different UIDVALIDITY means the server renumbered UIDs (RFC 3501
+      // 2.3.1.1): every stored UID is meaningless, so re-baseline instead of
+      // reporting the whole mailbox as new.
+      if (
+        credential.uidValidity != null &&
+        uidValidity != null &&
+        credential.uidValidity !== uidValidity
+      ) {
+        log.warn("IMAP UIDVALIDITY changed; resetting poll cursor", {
+          emailAccountId,
+          previousUidValidity: credential.uidValidity.toString(),
+          uidValidity: uidValidity.toString(),
+        });
+        await prisma.imapCredential.update({
+          where: { id: credential.id },
+          data: {
+            ...(uidNext == null ? {} : { lastSeenUid: uidNext - 1 }),
+            ...uidValidityUpdate,
             lastPolledAt: new Date(),
           },
         });
@@ -93,6 +122,12 @@ export async function pollImapAccount(
       const lastSeenUid = credential.lastSeenUid;
       if (uidNext <= lastSeenUid + 1) {
         // No new messages
+        if (uidValidity != null && credential.uidValidity == null) {
+          await prisma.imapCredential.update({
+            where: { id: credential.id },
+            data: { ...uidValidityUpdate, lastPolledAt: new Date() },
+          });
+        }
         return { newMessages: 0 };
       }
 
@@ -208,6 +243,7 @@ export async function pollImapAccount(
           where: { id: credential.id },
           data: {
             lastSeenUid: cursor,
+            ...uidValidityUpdate,
             lastPolledAt: new Date(),
           },
         });

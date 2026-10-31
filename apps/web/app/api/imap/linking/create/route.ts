@@ -62,11 +62,12 @@ export const POST = withAuth("imap/linking/create", async (request) => {
     );
   }
 
-  // Seed the poll cursor from the mailbox's uidNext so the first poll is a
-  // baseline (0 new). Without this the first poll would report the whole
-  // pre-link mailbox as new. A failed probe leaves lastSeenUid null and the
-  // first poll baselines instead — same 0-new outcome.
+  // Seed the poll cursor from the mailbox's uidNext/uidValidity so the first
+  // poll is a baseline (0 new). Without this the first poll would report the
+  // whole pre-link mailbox as new. A failed probe leaves the cursor null and
+  // the first poll baselines instead — same 0-new outcome.
   let lastSeenUid: number | null = null;
+  let uidValidity: bigint | null = null;
   try {
     const probe = createImapConnection({
       email: normalizedEmail,
@@ -85,11 +86,14 @@ export const POST = withAuth("imap/linking/create", async (request) => {
       const mailbox = await probe.mailboxOpen("INBOX", { readOnly: true });
       lastSeenUid =
         mailbox.uidNext === undefined ? null : Number(mailbox.uidNext) - 1;
+      uidValidity =
+        mailbox.uidValidity === undefined ? null : BigInt(mailbox.uidValidity);
     } finally {
       await probe.logout().catch(() => {});
     }
   } catch {
     lastSeenUid = null;
+    uidValidity = null;
   }
 
   // Create Account + ImapCredential + EmailAccount in a single transaction
@@ -111,6 +115,7 @@ export const POST = withAuth("imap/linking/create", async (request) => {
             username: data.username,
             password: encryptedPassword,
             ...(lastSeenUid != null ? { lastSeenUid } : {}),
+            ...(uidValidity != null ? { uidValidity } : {}),
           },
         },
         emailAccount: {

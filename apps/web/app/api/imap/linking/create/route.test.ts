@@ -17,7 +17,7 @@ vi.mock("@/utils/encryption", () => ({
 vi.mock("@/utils/imap/client", () => ({
   createImapConnection: vi.fn(() => ({
     connect: vi.fn(async () => undefined),
-    mailboxOpen: vi.fn(async () => ({ uidNext: 42 })),
+    mailboxOpen: vi.fn(async () => ({ uidNext: 42, uidValidity: 42n })),
     logout: vi.fn(async () => undefined),
   })),
 }));
@@ -75,7 +75,10 @@ describe("POST /api/imap/linking/create", () => {
       expect.objectContaining({
         data: expect.objectContaining({
           imapCredential: expect.objectContaining({
-            create: expect.objectContaining({ lastSeenUid: 41 }),
+            create: expect.objectContaining({
+              lastSeenUid: 41,
+              uidValidity: 42n,
+            }),
           }),
         }),
       }),

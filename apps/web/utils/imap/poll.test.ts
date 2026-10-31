@@ -57,10 +57,14 @@ const validatedAccount = {
   rules: [],
 };
 
-function mockLastSeenUid(lastSeenUid: number | null) {
+function mockLastSeenUid(
+  lastSeenUid: number | null,
+  uidValidity: bigint | null = null,
+) {
   prisma.imapCredential.findFirst.mockResolvedValue({
     id: "credential-1",
     lastSeenUid,
+    uidValidity,
   } as never);
 }
 
@@ -235,6 +239,61 @@ describe("pollImapAccount", () => {
     expect(prisma.imapCredential.update).toHaveBeenCalledWith({
       where: { id: "credential-1" },
       data: { lastPolledAt: expect.any(Date) },
+    });
+  });
+
+  it("resets the cursor to the baseline when UIDVALIDITY changes", async () => {
+    mockLastSeenUid(3, 42n);
+    vi.mocked(stubClient.mailboxOpen).mockResolvedValueOnce({
+      uidNext: 6,
+      uidValidity: 43n,
+    } as never);
+
+    const result = await pollImapAccount("email-account-uidvalidity");
+
+    expect(result.newMessages).toBe(0);
+    expect(processHistoryItem).not.toHaveBeenCalled();
+    expect(prisma.imapCredential.update).toHaveBeenCalledWith({
+      where: { id: "credential-1" },
+      data: {
+        lastSeenUid: 5,
+        uidValidity: 43n,
+        lastPolledAt: expect.any(Date),
+      },
+    });
+  });
+
+  it("records UIDVALIDITY on the first poll", async () => {
+    mockLastSeenUid(null);
+    vi.mocked(stubClient.mailboxOpen).mockResolvedValueOnce({
+      uidNext: 6,
+      uidValidity: 42n,
+    } as never);
+
+    await pollImapAccount("email-account-first-uidvalidity");
+
+    expect(prisma.imapCredential.update).toHaveBeenCalledWith({
+      where: { id: "credential-1" },
+      data: {
+        lastSeenUid: 5,
+        uidValidity: 42n,
+        lastPolledAt: expect.any(Date),
+      },
+    });
+  });
+
+  it("records UIDVALIDITY for an existing cursor that has none", async () => {
+    mockLastSeenUid(5);
+    vi.mocked(stubClient.mailboxOpen).mockResolvedValueOnce({
+      uidNext: 6,
+      uidValidity: 42n,
+    } as never);
+
+    await pollImapAccount("email-account-learn-uidvalidity");
+
+    expect(prisma.imapCredential.update).toHaveBeenCalledWith({
+      where: { id: "credential-1" },
+      data: { uidValidity: 42n, lastPolledAt: expect.any(Date) },
     });
   });
 

@@ -51,6 +51,7 @@ model ImapCredential {
   password     String    @db.Text // Encrypted with encryptToken()
   lastPolledAt DateTime?
   lastSeenUid  Int?
+  uidValidity  BigInt?
   accountId    String    @unique
   account      Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
 }
