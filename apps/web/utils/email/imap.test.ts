@@ -1475,6 +1475,123 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
 
     expect(moved).toEqual([{ uid: 1, to: "Folders/Archive", from: "INBOX" }]);
   });
+
+  it("archiveThreadWithLabel into a Proton label COPYs the label then archives, never MOVEs into Labels/*", async () => {
+    const fake = createFakeClient(protonMailboxes());
+    const copied: Array<{ uid: number; to: string; from: string }> = [];
+    const moved: Array<{ uid: number; to: string; from: string }> = [];
+    fake.client.messageCopy = vi.fn(async (uid: string, to: string) => {
+      copied.push({ uid: Number(uid), to, from: fake.opened.at(-1) || "" });
+      const inbox = mailboxesOf(fake).INBOX;
+      const found = inbox.find((m) => m.uid === Number(uid));
+      if (found) mailboxesOf(fake)["Labels/Work"].push(found);
+    });
+    fake.client.messageMove = vi.fn(async (uid: string, to: string) => {
+      moved.push({ uid: Number(uid), to, from: fake.opened.at(-1) || "" });
+      const inbox = mailboxesOf(fake).INBOX;
+      const index = inbox.findIndex((m) => m.uid === Number(uid));
+      if (index >= 0) {
+        const [item] = inbox.splice(index, 1);
+        mailboxesOf(fake)[to].push(item);
+      }
+    });
+    connection.client = fake.client;
+
+    await new ImapProvider(config).archiveThreadWithLabel(
+      buildThreadId(undefined, undefined, "<root@x>"),
+      "owner@example.com",
+      "Labels/Work",
+    );
+
+    expect(copied).toEqual([{ uid: 1, to: "Labels/Work", from: "INBOX" }]);
+    expect(moved).toEqual([{ uid: 1, to: "Archive", from: "INBOX" }]);
+    expect(mailboxesOf(fake).INBOX).toEqual([]);
+    expect(mailboxesOf(fake).Archive).toHaveLength(1);
+    expect(mailboxesOf(fake)["Labels/Work"]).toHaveLength(1);
+  });
+
+  it("stale view ids on Bridge resolve as not found, so archive is a no-op", async () => {
+    const fake = createFakeClient(protonMailboxes());
+    connection.client = fake.client;
+
+    const stale = `fallback:${encodeImapMessageId("All Mail", 40)}`;
+    await new ImapProvider(config).archiveThread(stale, "owner@example.com");
+
+    expect(fake.client.messageMove).not.toHaveBeenCalled();
+    expect(fake.opened).not.toContain("All Mail");
+  });
+
+  it("never SELECTs the top-level Folders/Labels containers on Bridge", async () => {
+    const fake = createFakeClient(protonMailboxes());
+    connection.client = fake.client;
+
+    await new ImapProvider(config).getThreadMessages(
+      buildThreadId(undefined, undefined, "<root@x>"),
+    );
+
+    expect(fake.opened).not.toContain("Folders");
+    expect(fake.opened).not.toContain("Labels");
+  });
+
+  it("skips one failing folder and still resolves the thread from the rest", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, {
+            messageId: "<root@x>",
+          }),
+          message(2, "2026-01-02", "owner@example.com", undefined, {
+            messageId: "<m1@x>",
+            inReplyTo: "<root@x>",
+            references: "<root@x>",
+          }),
+        ],
+      },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+    ]);
+    const open = fake.client.mailboxOpen;
+    fake.client.mailboxOpen = vi.fn(async (path: string) => {
+      if (path === "Archive")
+        throw Object.assign(new Error("Mailbox Archive gone"), {
+          responseStatus: "NO",
+        });
+      return open(path);
+    });
+    connection.client = fake.client;
+
+    const messages = await new ImapProvider(config).getThreadMessages(
+      buildThreadId(undefined, undefined, "<root@x>"),
+    );
+
+    expect(messages).toHaveLength(2);
+  });
+
+  it("getFolders on Bridge hides All Mail, Starred, Labels/* and containers", async () => {
+    const fake = createFakeClient(protonMailboxes());
+    connection.client = fake.client;
+
+    const folders = await new ImapProvider(config).getFolders();
+    const ids = folders.map((folder) => folder.id);
+
+    expect(ids).toEqual(
+      expect.arrayContaining(["INBOX", "Sent", "Drafts", "Archive"]),
+    );
+    for (const id of ids) {
+      expect(id).not.toBe("All Mail");
+      expect(id).not.toBe("Starred");
+      expect(id).not.toBe("Folders");
+      expect(id).not.toBe("Labels");
+      expect(id.startsWith("Labels/")).toBe(false);
+    }
+    await expect(
+      new ImapProvider(config).moveThreadToFolder(
+        buildThreadId(undefined, undefined, "<root@x>"),
+        "owner@example.com",
+        "All Mail",
+      ),
+    ).rejects.toThrow(/view mailbox/);
+  });
 });
 
 describe("ImapProvider thread id agreement across listing, getMessage and thread ops", () => {
@@ -1525,6 +1642,66 @@ describe("ImapProvider thread id agreement across listing, getMessage and thread
           ...m,
           uid: 11 + index,
         })),
+      },
+      { path: "Folders", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels/Work", messages: [] },
+      { path: "Starred", specialUse: "\\Flagged", messages: [] },
+    ];
+  }
+
+  function spreadBridgeMailboxes() {
+    return [
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, {
+            messageId: "<r@x>",
+          }),
+        ],
+      },
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [
+          message(2, "2026-01-02", "owner@example.com", undefined, {
+            messageId: "<m1@x>",
+            inReplyTo: "<r@x>",
+            references: "<r@x>",
+          }),
+        ],
+      },
+      {
+        path: "Folders/Projets/AFPS",
+        messages: [
+          message(3, "2026-01-03", "alice@x", undefined, {
+            messageId: "<m2@x>",
+            inReplyTo: "<m1@x>",
+            references: "<r@x> <m1@x>",
+          }),
+        ],
+      },
+      { path: "Drafts", specialUse: "\\Drafts", messages: [] },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+      { path: "Spam", specialUse: "\\Junk", messages: [] },
+      { path: "Trash", specialUse: "\\Trash", messages: [] },
+      {
+        path: "All Mail",
+        messages: [
+          message(11, "2026-01-01", "alice@x", undefined, {
+            messageId: "<r@x>",
+          }),
+          message(12, "2026-01-02", "owner@example.com", undefined, {
+            messageId: "<m1@x>",
+            inReplyTo: "<r@x>",
+            references: "<r@x>",
+          }),
+          message(13, "2026-01-03", "alice@x", undefined, {
+            messageId: "<m2@x>",
+            inReplyTo: "<m1@x>",
+            references: "<r@x> <m1@x>",
+          }),
+        ],
       },
       { path: "Folders", flags: ["\\Noselect"], messages: [] },
       { path: "Labels", flags: ["\\Noselect"], messages: [] },
@@ -1676,7 +1853,7 @@ describe("ImapProvider thread id agreement across listing, getMessage and thread
     expect(fake.client.search).not.toHaveBeenCalled();
   });
 
-  it("resolves a thread with one SEARCH per folder and no follow-up hops", async () => {
+  it("resolves a thread with one SEARCH per real folder on Bridge, never All Mail", async () => {
     const plain = threadMailboxes();
     const fake = createFakeClient([
       ...plain,
@@ -1703,7 +1880,18 @@ describe("ImapProvider thread id agreement across listing, getMessage and thread
     );
 
     expect(messages).toHaveLength(3);
-    expect(fake.opened).toEqual(["All Mail"]);
+    expect(fake.opened).not.toContain("All Mail");
+    expect(fake.opened).not.toContain("Labels/Work");
+    expect(fake.opened).not.toContain("Starred");
+    for (const message of messages) {
+      const folder = Buffer.from(
+        message.id.slice(message.id.indexOf("@") + 1),
+        "base64url",
+      ).toString("utf8");
+      expect(folder).not.toBe("All Mail");
+      expect(folder.startsWith("Labels/")).toBe(false);
+      expect(folder).not.toBe("Starred");
+    }
     const headerSearches = (
       fake.client.search as unknown as { mock: { calls: unknown[][] } }
     ).mock.calls.filter((call) =>
