@@ -1,110 +1,228 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getImapCredentials } from "@/utils/imap/credential";
 import { encodeImapMessageId } from "@/utils/imap/message-id";
-import { fetchMessageByUid, searchImapMessages } from "@/utils/imap/message";
-import { pollImapAccount } from "@/utils/imap/poll";
-import { createEmailProvider } from "@/utils/email/provider";
-import { processHistoryItem } from "@/utils/webhook/process-history-item";
-import { validateWebhookAccount } from "@/utils/webhook/validate-webhook-account";
-import prisma from "@/utils/__mocks__/prisma";
 
-vi.mock("@/utils/prisma");
-vi.mock("@/utils/imap/credential", () => ({
-  getImapCredentials: vi.fn(),
-}));
+type Credential = {
+  id: string;
+  lastSeenUid: number | null;
+  uidValidity: bigint | null;
+  pollFailureUid: number | null;
+  pollFailureCount: number;
+  pollLockedUntil: Date | null;
+};
+
+const { state, prismaFake } = vi.hoisted(() => {
+  const state = {
+    credential: null as Credential | null,
+    accounts: [{ id: "email-account-1" }],
+    mailboxUids: [] as number[],
+    mailboxOverride: null as { uidNext?: number; uidValidity?: bigint } | null,
+    processed: [] as string[],
+    seen: [] as Array<{
+      messageId: string;
+      message: { labelIds?: string[]; threadId: string };
+      context: unknown;
+    }>,
+    processHook: null as null | ((messageId: string) => Promise<void>),
+    fromAddress: "news@example.com",
+    labelIds: ["INBOX", "UNREAD"] as string[],
+    validationFails: false,
+  };
+
+  const prismaFake = {
+    imapCredential: {
+      findFirst: async () =>
+        state.credential ? { ...state.credential } : null,
+      update: async ({ data }: { data: Partial<Credential> }) => {
+        Object.assign(state.credential!, data);
+        return state.credential;
+      },
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: {
+          lastSeenUid?: { lt: number };
+          pollLockedUntil?: Date;
+          OR?: unknown[];
+        };
+        data: Partial<Credential>;
+      }) => {
+        const credential = state.credential!;
+        // Claim: either no lock or an expired one.
+        if (where.OR) {
+          if (
+            credential.pollLockedUntil &&
+            credential.pollLockedUntil > new Date()
+          )
+            return { count: 0 };
+          credential.pollLockedUntil = data.pollLockedUntil ?? null;
+          return { count: 1 };
+        }
+        // Release: only the run that still owns the lock clears it.
+        if (where.pollLockedUntil) {
+          if (
+            credential.pollLockedUntil?.getTime() !==
+            where.pollLockedUntil.getTime()
+          )
+            return { count: 0 };
+          credential.pollLockedUntil = null;
+          return { count: 1 };
+        }
+        // Cursor advance, guarded so it never moves backward.
+        if (where.lastSeenUid) {
+          if (
+            credential.lastSeenUid === null ||
+            credential.lastSeenUid >= where.lastSeenUid.lt
+          )
+            return { count: 0 };
+          Object.assign(credential, data);
+          return { count: 1 };
+        }
+        throw new Error("unexpected updateMany");
+      },
+    },
+    emailAccount: { findMany: async () => state.accounts },
+  };
+
+  return { state, prismaFake };
+});
+
+const client = {
+  mailboxOpen: async () =>
+    state.mailboxOverride ?? {
+      uidNext: Math.max(0, ...state.mailboxUids) + 1,
+      uidValidity: 1n,
+    },
+};
+
+vi.mock("@/utils/prisma", () => ({ default: prismaFake }));
 vi.mock("@/utils/imap/client", () => ({
-  withImapConnection: vi.fn(
-    async (_config: unknown, fn: (client: unknown) => Promise<unknown>) =>
-      fn(stubClient),
-  ),
+  withImapConnection: async (
+    _config: unknown,
+    fn: (client: unknown) => Promise<unknown>,
+  ) => fn(client),
+}));
+vi.mock("@/utils/imap/credential", () => ({
+  getImapCredentials: async () => ({
+    email: "me@example.com",
+    emailAccountId: "email-account-1",
+    imapHost: "localhost",
+    imapPort: 993,
+    imapSecurity: "tls",
+    smtpHost: "localhost",
+    smtpPort: 587,
+    smtpSecurity: "starttls",
+    username: "me@example.com",
+    password: "secret",
+  }),
 }));
 vi.mock("@/utils/imap/message", () => ({
-  fetchMessageByUid: vi.fn(),
-  searchImapMessages: vi.fn(),
+  searchImapMessages: async (
+    _client: unknown,
+    criteria: { uid?: string; all?: boolean },
+  ) => {
+    if (criteria.all) return [...state.mailboxUids].reverse();
+    const uids = state.mailboxUids;
+    if (!criteria.uid) return [...uids].reverse();
+    const from = Number(criteria.uid.split(":")[0]);
+    const matched = uids.filter((uid) => uid >= from);
+    // RFC 3501: `n:*` matches the highest UID even when n is above it.
+    return (matched.length > 0 ? matched : uids.slice(-1)).reverse();
+  },
+  fetchMessageByUid: async (_client: unknown, uid: number) => ({
+    id: `${uid}@${Buffer.from("INBOX").toString("base64url")}`,
+    labelIds: state.labelIds,
+    threadId: "t.thread",
+    headers: { from: state.fromAddress },
+  }),
 }));
 vi.mock("@/utils/email/provider", () => ({
-  createEmailProvider: vi.fn(),
+  createEmailProvider: async () => ({}),
 }));
 vi.mock("@/utils/redis/message-processing", () => ({
-  withMessageProcessingLock: vi.fn(
-    async (_key: unknown, fn: () => Promise<unknown>) => {
-      await fn();
-      return { skipped: false };
-    },
-  ),
+  withMessageProcessingLock: async (
+    _key: unknown,
+    fn: () => Promise<unknown>,
+  ) => {
+    await fn();
+    return { skipped: false };
+  },
 }));
 vi.mock("@/utils/webhook/process-history-item", () => ({
-  processHistoryItem: vi.fn(),
+  processHistoryItem: async (
+    item: {
+      messageId: string;
+      message: { labelIds?: string[]; threadId: string };
+    },
+    context: unknown,
+  ) => {
+    state.processed.push(item.messageId);
+    state.seen.push({
+      messageId: item.messageId,
+      message: {
+        labelIds: item.message.labelIds,
+        threadId: item.message.threadId,
+      },
+      context,
+    });
+    if (state.processHook) await state.processHook(item.messageId);
+  },
 }));
 vi.mock("@/utils/webhook/validate-webhook-account", () => ({
-  getWebhookEmailAccount: vi.fn(),
-  validateWebhookAccount: vi.fn(),
+  getWebhookEmailAccount: async () => ({ id: "email-account-1" }),
+  validateWebhookAccount: async () =>
+    state.validationFails
+      ? { success: false, response: new Response() }
+      : {
+          success: true,
+          data: {
+            emailAccount: { id: "email-account-1", rules: [] },
+            hasAutomationRules: true,
+            hasAiAccess: true,
+          },
+        },
+}));
+vi.mock("@/env", () => ({
+  env: { REDIS_HTTP_URL: undefined, REDIS_HTTP_TOKEN: undefined },
 }));
 
-let mailboxUids: number[];
+import {
+  POLL_TIME_BUDGET_MS,
+  pollAllImapAccounts,
+  pollImapAccount,
+} from "@/utils/imap/poll";
 
-const stubClient = {
-  mailboxOpen: vi.fn(async () => ({
-    uidNext: mailboxUids.length > 0 ? Math.max(...mailboxUids) + 1 : 1,
-  })),
-};
-
-const validatedAccount = {
-  id: "email-account-1",
-  email: "me@example.com",
-  userId: "user-1",
-  account: { provider: "imap" },
-  rules: [],
-};
-
-function mockLastSeenUid(
+function setCursor(
   lastSeenUid: number | null,
   uidValidity: bigint | null = null,
 ) {
-  prisma.imapCredential.findFirst.mockResolvedValue({
+  state.credential = {
     id: "credential-1",
     lastSeenUid,
     uidValidity,
-  } as never);
+    pollFailureUid: null,
+    pollFailureCount: 0,
+    pollLockedUntil: null,
+  };
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
-  mailboxUids = [1, 2, 3, 4, 5];
-  vi.mocked(getImapCredentials).mockResolvedValue({
-    email: "me@example.com",
-  } as never);
-  prisma.imapCredential.update.mockResolvedValue({
-    id: "credential-1",
-  } as never);
-  vi.mocked(searchImapMessages).mockImplementation(
-    async (_client, criteria) => {
-      if (typeof criteria.uid !== "string") return [...mailboxUids];
-      const from = Number(criteria.uid.split(":")[0]);
-      const matched = mailboxUids.filter((uid) => uid >= from);
-      // RFC 3501: `n:*` matches the highest UID even when n is above it.
-      return (matched.length > 0 ? matched : mailboxUids.slice(-1)).reverse();
-    },
-  );
-  vi.mocked(fetchMessageByUid).mockImplementation(
-    async (_client, uid) =>
-      ({ id: encodeImapMessageId("INBOX", uid) }) as never,
-  );
-  vi.mocked(createEmailProvider).mockResolvedValue({} as never);
-  vi.mocked(validateWebhookAccount).mockResolvedValue({
-    success: true,
-    data: {
-      emailAccount: validatedAccount,
-      hasAutomationRules: true,
-      hasAiAccess: true,
-    },
-  } as never);
-  vi.mocked(processHistoryItem).mockResolvedValue(undefined);
+  state.credential = null;
+  state.accounts = [{ id: "email-account-1" }];
+  state.mailboxUids = [1, 2, 3, 4, 5];
+  state.mailboxOverride = null;
+  state.processed = [];
+  state.seen = [];
+  state.processHook = null;
+  state.fromAddress = "news@example.com";
+  state.labelIds = ["INBOX", "UNREAD"];
+  state.validationFails = false;
+  setCursor(null);
 });
 
 describe("pollImapAccount", () => {
   it("reports nothing for an idle mailbox instead of its newest message", async () => {
-    mockLastSeenUid(5);
+    setCursor(5);
 
     const result = await pollImapAccount("email-account-1");
 
@@ -112,12 +230,12 @@ describe("pollImapAccount", () => {
       emailAccountId: "email-account-1",
       newMessages: 0,
     });
-    expect(prisma.imapCredential.update).not.toHaveBeenCalled();
-    expect(processHistoryItem).not.toHaveBeenCalled();
+    expect(state.credential?.lastSeenUid).toBe(5);
+    expect(state.processed).toEqual([]);
   });
 
   it("reports and records new messages above the stored UID", async () => {
-    mockLastSeenUid(3);
+    setCursor(3);
 
     const result = await pollImapAccount("email-account-1");
 
@@ -125,79 +243,173 @@ describe("pollImapAccount", () => {
       emailAccountId: "email-account-1",
       newMessages: 2,
     });
-    expect(prisma.imapCredential.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: "credential-1" },
-        data: expect.objectContaining({ lastSeenUid: 5 }),
-      }),
-    );
+    expect(state.credential?.lastSeenUid).toBe(5);
   });
 
   it("feeds new inbox messages to the shared processor with qualified ids", async () => {
-    mockLastSeenUid(4);
+    setCursor(4);
 
     await pollImapAccount("email-account-1");
 
-    const messageId = encodeImapMessageId("INBOX", 5);
-    expect(processHistoryItem).toHaveBeenCalledTimes(1);
-    expect(processHistoryItem).toHaveBeenCalledWith(
-      { messageId, message: { id: messageId } },
+    expect(state.seen).toEqual([
       expect.objectContaining({
-        provider: expect.anything(),
-        hasAutomationRules: true,
-        hasAiAccess: true,
-        emailAccount: expect.objectContaining({
-          id: "email-account-1",
-          account: { provider: "imap" },
+        messageId: encodeImapMessageId("INBOX", 5),
+        message: expect.objectContaining({
+          labelIds: ["INBOX", "UNREAD"],
+          threadId: "t.thread",
+        }),
+        context: expect.objectContaining({
+          hasAutomationRules: true,
+          hasAiAccess: true,
+          emailAccount: expect.objectContaining({
+            id: "email-account-1",
+            account: { provider: "imap" },
+          }),
         }),
       }),
-    );
+    ]);
   });
 
   it("does not advance the cursor past a failed message", async () => {
-    mockLastSeenUid(3);
-    vi.mocked(processHistoryItem).mockRejectedValueOnce(
-      new Error("processing failed"),
-    );
+    setCursor(3);
+    state.processHook = async () => {
+      throw new Error("processing failed");
+    };
 
-    const result = await pollImapAccount("email-account-failure");
+    const result = await pollImapAccount("email-account-1");
 
     expect(result.newMessages).toBe(0);
-    expect(prisma.imapCredential.update).not.toHaveBeenCalled();
+    expect(state.credential?.lastSeenUid).toBe(3);
+    expect(state.credential?.pollFailureUid).toBe(4);
+    expect(state.credential?.pollFailureCount).toBe(1);
   });
 
   it("skips a message that keeps failing so newer mail is not blocked", async () => {
-    vi.mocked(processHistoryItem).mockRejectedValue(
-      new Error("processing failed"),
-    );
-    mailboxUids = [1, 2, 3, 4, 5];
-    prisma.imapCredential.findFirst.mockResolvedValue({
-      id: "credential-1",
-      lastSeenUid: 4,
-    } as never);
+    setCursor(4);
+    state.processHook = async () => {
+      throw new Error("processing failed");
+    };
 
-    await pollImapAccount("email-account-permanent-failure");
-    expect(prisma.imapCredential.update).not.toHaveBeenCalled();
+    await pollImapAccount("email-account-1");
+    expect(state.credential?.lastSeenUid).toBe(4);
 
-    await pollImapAccount("email-account-permanent-failure");
-    expect(prisma.imapCredential.update).not.toHaveBeenCalled();
+    await pollImapAccount("email-account-1");
+    expect(state.credential?.lastSeenUid).toBe(4);
 
-    vi.mocked(processHistoryItem).mockResolvedValue(undefined);
-    await pollImapAccount("email-account-permanent-failure");
+    await pollImapAccount("email-account-1");
 
-    expect(prisma.imapCredential.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ lastSeenUid: 5 }),
-      }),
-    );
+    expect(state.credential?.lastSeenUid).toBe(5);
+    expect(state.credential?.pollFailureUid).toBeNull();
+    expect(state.credential?.pollFailureCount).toBe(0);
+  });
+
+  it("keeps the failure count across invocations, not in module memory", async () => {
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6];
+    state.processHook = async () => {
+      throw new Error("boom");
+    };
+
+    const cursors: Array<number | null> = [];
+    for (let i = 0; i < 5; i++) {
+      // A poll is a fresh invocation in production; the strike counter must
+      // live in the database to survive it.
+      vi.resetModules();
+      const fresh = await import("@/utils/imap/poll");
+      await fresh.pollImapAccount("email-account-1");
+      cursors.push(state.credential!.lastSeenUid);
+    }
+
+    expect(cursors).toEqual([5, 5, 6, 6, 6]);
+  });
+
+  it("advances the cursor per handled message so a stopped run is not replayed", async () => {
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6, 7, 8];
+    state.processHook = async (messageId) => {
+      if (messageId === encodeImapMessageId("INBOX", 8))
+        throw new Error("boom");
+    };
+
+    await pollImapAccount("email-account-1");
+    expect(state.credential?.lastSeenUid).toBe(7);
+
+    state.processHook = null;
+    await pollImapAccount("email-account-1");
+
+    expect(state.processed.filter((id) => id === "6@SU5CT1g")).toHaveLength(1);
+    expect(state.credential?.lastSeenUid).toBe(8);
+  });
+
+  it("processes a shared UID once when polls overlap", async () => {
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6];
+    const processing = Promise.withResolvers<void>();
+    state.processHook = async () => {
+      await processing.promise;
+    };
+
+    const firstPoll = pollImapAccount("email-account-1");
+    const secondPoll = pollImapAccount("email-account-1");
+    processing.resolve();
+    const [first, second] = await Promise.all([firstPoll, secondPoll]);
+
+    expect(state.processed.filter((id) => id === "6@SU5CT1g")).toHaveLength(1);
+    expect(first.newMessages + second.newMessages).toBe(1);
+    expect(state.credential?.pollLockedUntil).toBeNull();
+  });
+
+  it("resumes after an expired claim", async () => {
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6];
+    state.credential!.pollLockedUntil = new Date(Date.now() - 60_000);
+
+    const result = await pollImapAccount("email-account-1");
+
+    expect(result.newMessages).toBe(1);
+    expect(state.credential?.lastSeenUid).toBe(6);
+  });
+
+  it("skips a message the account sent itself but still advances", async () => {
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6];
+    state.fromAddress = "Me <Me@Example.com>";
+
+    const result = await pollImapAccount("email-account-1");
+
+    expect(result.newMessages).toBe(0);
+    expect(state.processed).toEqual([]);
+    expect(state.credential?.lastSeenUid).toBe(6);
+  });
+
+  it("skips a message labelled SENT like Outlook's sent-items rule", async () => {
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6];
+    state.labelIds = ["SENT"];
+
+    const result = await pollImapAccount("email-account-1");
+
+    expect(result.newMessages).toBe(0);
+    expect(state.processed).toEqual([]);
+    expect(state.credential?.lastSeenUid).toBe(6);
+  });
+
+  it("stops starting messages once the deadline has passed", async () => {
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6, 7];
+
+    const result = await pollImapAccount("email-account-1", undefined, {
+      deadline: Date.now() - 1,
+    });
+
+    expect(result.newMessages).toBe(0);
+    expect(state.processed).toEqual([]);
+    expect(state.credential?.lastSeenUid).toBe(5);
   });
 
   it("skips accounts without automation rules or AI access", async () => {
-    mockLastSeenUid(3);
-    vi.mocked(validateWebhookAccount).mockResolvedValue({
-      success: false,
-      response: new Response(),
-    } as never);
+    setCursor(3);
+    state.validationFails = true;
 
     const result = await pollImapAccount("email-account-no-rules");
 
@@ -205,12 +417,12 @@ describe("pollImapAccount", () => {
       emailAccountId: "email-account-no-rules",
       newMessages: 0,
     });
-    expect(processHistoryItem).not.toHaveBeenCalled();
-    expect(prisma.imapCredential.update).not.toHaveBeenCalled();
+    expect(state.processed).toEqual([]);
+    expect(state.credential?.lastSeenUid).toBe(3);
   });
 
   it("baselines a null cursor: first poll reports 0 new", async () => {
-    mockLastSeenUid(null);
+    setCursor(null);
 
     const result = await pollImapAccount("email-account-1");
 
@@ -218,17 +430,12 @@ describe("pollImapAccount", () => {
       emailAccountId: "email-account-1",
       newMessages: 0,
     });
-    expect(prisma.imapCredential.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        where: { id: "credential-1" },
-        data: expect.objectContaining({ lastSeenUid: 5 }),
-      }),
-    );
+    expect(state.credential?.lastSeenUid).toBe(5);
   });
 
   it("keeps the baseline unset when the server omits UIDNEXT", async () => {
-    mockLastSeenUid(null);
-    vi.mocked(stubClient.mailboxOpen).mockResolvedValueOnce({} as never);
+    setCursor(null);
+    state.mailboxOverride = {};
 
     const result = await pollImapAccount("email-account-1");
 
@@ -236,73 +443,71 @@ describe("pollImapAccount", () => {
       emailAccountId: "email-account-1",
       newMessages: 0,
     });
-    expect(prisma.imapCredential.update).toHaveBeenCalledWith({
-      where: { id: "credential-1" },
-      data: { lastPolledAt: expect.any(Date) },
-    });
+    expect(state.credential?.lastSeenUid).toBeNull();
   });
 
   it("resets the cursor to the baseline when UIDVALIDITY changes", async () => {
-    mockLastSeenUid(3, 42n);
-    vi.mocked(stubClient.mailboxOpen).mockResolvedValueOnce({
-      uidNext: 6,
-      uidValidity: 43n,
-    } as never);
+    setCursor(3, 42n);
+    state.mailboxOverride = { uidNext: 6, uidValidity: 43n };
 
     const result = await pollImapAccount("email-account-uidvalidity");
 
     expect(result.newMessages).toBe(0);
-    expect(processHistoryItem).not.toHaveBeenCalled();
-    expect(prisma.imapCredential.update).toHaveBeenCalledWith({
-      where: { id: "credential-1" },
-      data: {
-        lastSeenUid: 5,
-        uidValidity: 43n,
-        lastPolledAt: expect.any(Date),
-      },
-    });
+    expect(state.processed).toEqual([]);
+    expect(state.credential?.lastSeenUid).toBe(5);
+    expect(state.credential?.uidValidity).toBe(43n);
   });
 
   it("records UIDVALIDITY on the first poll", async () => {
-    mockLastSeenUid(null);
-    vi.mocked(stubClient.mailboxOpen).mockResolvedValueOnce({
-      uidNext: 6,
-      uidValidity: 42n,
-    } as never);
+    setCursor(null);
+    state.mailboxOverride = { uidNext: 6, uidValidity: 42n };
 
     await pollImapAccount("email-account-first-uidvalidity");
 
-    expect(prisma.imapCredential.update).toHaveBeenCalledWith({
-      where: { id: "credential-1" },
-      data: {
-        lastSeenUid: 5,
-        uidValidity: 42n,
-        lastPolledAt: expect.any(Date),
-      },
-    });
+    expect(state.credential?.lastSeenUid).toBe(5);
+    expect(state.credential?.uidValidity).toBe(42n);
   });
 
   it("records UIDVALIDITY for an existing cursor that has none", async () => {
-    mockLastSeenUid(5);
-    vi.mocked(stubClient.mailboxOpen).mockResolvedValueOnce({
-      uidNext: 6,
-      uidValidity: 42n,
-    } as never);
+    setCursor(5);
+    state.mailboxOverride = { uidNext: 6, uidValidity: 42n };
 
     await pollImapAccount("email-account-learn-uidvalidity");
 
-    expect(prisma.imapCredential.update).toHaveBeenCalledWith({
-      where: { id: "credential-1" },
-      data: { uidValidity: 42n, lastPolledAt: expect.any(Date) },
-    });
+    expect(state.credential?.lastSeenUid).toBe(5);
+    expect(state.credential?.uidValidity).toBe(42n);
   });
 
   it("never moves the stored UID backward", async () => {
-    mockLastSeenUid(10);
+    setCursor(10);
 
     const result = await pollImapAccount("email-account-1");
 
     expect(result.newMessages).toBe(0);
-    expect(prisma.imapCredential.update).not.toHaveBeenCalled();
+    expect(state.credential?.lastSeenUid).toBe(10);
+  });
+});
+
+describe("pollAllImapAccounts", () => {
+  it("stops starting accounts once the run budget is spent", async () => {
+    state.accounts = [{ id: "email-account-1" }, { id: "email-account-2" }];
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6];
+
+    vi.useFakeTimers();
+    try {
+      state.processHook = async () => {
+        vi.setSystemTime(Date.now() + POLL_TIME_BUDGET_MS + 1000);
+      };
+
+      const results = await pollAllImapAccounts();
+
+      expect(results.map((result) => result.emailAccountId)).toEqual([
+        "email-account-1",
+      ]);
+      expect(state.processed).toEqual([encodeImapMessageId("INBOX", 6)]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

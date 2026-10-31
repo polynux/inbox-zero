@@ -1,4 +1,5 @@
 import { env } from "@/env";
+import { extractEmailAddress } from "@/utils/email";
 import { createEmailProvider } from "@/utils/email/provider";
 import { withImapConnection } from "@/utils/imap/client";
 import { getImapCredentials } from "@/utils/imap/credential";
@@ -22,8 +23,12 @@ const MAX_MESSAGES_PER_POLL = 50;
 // One bad message must not pin the cursor forever; after this many polls it is
 // skipped (and logged) so later mail still reaches automation.
 const MAX_PROCESSING_FAILURES = 3;
-
-const processingFailures = new Map<string, number>();
+// A whole run must finish inside the scheduler's request timeout; whatever is
+// left is picked up by the next tick, because the cursor advances per message.
+export const POLL_TIME_BUDGET_MS = 50_000;
+// Overlapping ticks (a retry, a manual call) must not process the same mail.
+// The claim expires so a killed run cannot block the account forever.
+const POLL_LOCK_MS = 5 * 60_000;
 
 interface PollResult {
   emailAccountId: string;
@@ -39,8 +44,18 @@ interface PollResult {
 export async function pollImapAccount(
   emailAccountId: string,
   logger?: Logger,
+  options?: { deadline?: number },
 ): Promise<PollResult> {
   const log = logger || defaultLogger;
+  const deadline = options?.deadline;
+
+  const lockedUntil = await claimImapPoll(emailAccountId);
+  if (!lockedUntil) {
+    log.info("Skipping IMAP poll; another poll holds the account lock", {
+      emailAccountId,
+    });
+    return { emailAccountId, newMessages: 0 };
+  }
 
   try {
     const credentials = await getImapCredentials(emailAccountId);
@@ -64,7 +79,13 @@ export async function pollImapAccount(
         where: {
           account: { emailAccount: { id: emailAccountId } },
         },
-        select: { id: true, lastSeenUid: true, uidValidity: true },
+        select: {
+          id: true,
+          lastSeenUid: true,
+          uidValidity: true,
+          pollFailureUid: true,
+          pollFailureCount: true,
+        },
       });
 
       if (!credential) {
@@ -160,55 +181,87 @@ export async function pollImapAccount(
       const processWithLock = Boolean(
         env.REDIS_HTTP_URL && env.REDIS_HTTP_TOKEN,
       );
+      const ownAddress = credentials.email.toLowerCase();
 
-      // Oldest first, and the cursor only moves past UIDs that were handled.
-      let cursor = lastSeenUid;
+      // Oldest first, and the cursor moves once per handled UID so a run that
+      // is killed mid-batch never replays the mail it already processed.
       let newMessages = 0;
       for (const uid of newUids) {
+        if (deadline !== undefined && Date.now() >= deadline) {
+          log.warn("Stopping IMAP poll at the time budget", {
+            emailAccountId,
+            uid,
+          });
+          break;
+        }
+
         const messageId = encodeImapMessageId("INBOX", uid);
-        const failureKey = `${emailAccountId}:${messageId}`;
 
         try {
           const message = await fetchMessageByUid(client, uid);
           if (!message) throw new Error("IMAP message could not be fetched");
 
-          const processMessage = async () => {
-            await processHistoryItem(
-              { messageId, message },
-              {
-                provider,
-                isNewMessage: true,
-                emailAccount: {
-                  ...validation.data.emailAccount,
-                  account: { provider: "imap" },
-                },
-                hasAutomationRules: validation.data.hasAutomationRules,
-                hasAiAccess: validation.data.hasAiAccess,
-                rules: validation.data.emailAccount.rules,
-                logger: log,
-              },
-            );
-          };
+          // Same rule Outlook applies: only inbox and sent items reach
+          // automation, and a copy of the account's own mail is not new mail
+          // for it to act on.
+          const fromAddress = extractEmailAddress(message.headers?.from ?? "");
+          const isOwnSent =
+            message.labelIds?.includes("SENT") ||
+            (fromAddress !== "" && fromAddress.toLowerCase() === ownAddress);
 
-          let skipped = false;
-          if (processWithLock) {
-            ({ skipped } = await withMessageProcessingLock(
-              { userEmail: credentials.email, messageId },
-              processMessage,
-            ));
-          } else {
-            await processMessage();
-          }
-
-          if (skipped) {
-            log.info("Skipping. Message already being processed.", {
+          if (isOwnSent) {
+            log.info("Skipping IMAP message the account sent itself", {
               emailAccountId,
               messageId,
             });
+          } else {
+            const processMessage = async () => {
+              await processHistoryItem(
+                { messageId, message },
+                {
+                  provider,
+                  isNewMessage: true,
+                  emailAccount: {
+                    ...validation.data.emailAccount,
+                    account: { provider: "imap" },
+                  },
+                  hasAutomationRules: validation.data.hasAutomationRules,
+                  hasAiAccess: validation.data.hasAiAccess,
+                  rules: validation.data.emailAccount.rules,
+                  logger: log,
+                },
+              );
+            };
+
+            let skipped = false;
+            if (processWithLock) {
+              ({ skipped } = await withMessageProcessingLock(
+                { userEmail: credentials.email, messageId },
+                processMessage,
+              ));
+            } else {
+              await processMessage();
+            }
+
+            if (skipped) {
+              log.info("Skipping. Message already being processed.", {
+                emailAccountId,
+                messageId,
+              });
+            }
+            newMessages++;
           }
         } catch (error) {
-          const failures = (processingFailures.get(failureKey) ?? 0) + 1;
-          processingFailures.set(failureKey, failures);
+          // Strikes are persisted: a poll is a fresh invocation (serverless or
+          // cron container), so an in-memory counter would never reach three.
+          const failures =
+            credential.pollFailureUid === uid
+              ? credential.pollFailureCount + 1
+              : 1;
+          await prisma.imapCredential.update({
+            where: { id: credential.id },
+            data: { pollFailureUid: uid, pollFailureCount: failures },
+          });
           const errorMessage =
             error instanceof Error ? error.message : "Unknown error";
 
@@ -228,25 +281,9 @@ export async function pollImapAccount(
             failures,
             error: errorMessage,
           });
-          processingFailures.delete(failureKey);
-          cursor = uid;
-          continue;
         }
 
-        processingFailures.delete(failureKey);
-        cursor = uid;
-        newMessages++;
-      }
-
-      if (cursor !== lastSeenUid) {
-        await prisma.imapCredential.update({
-          where: { id: credential.id },
-          data: {
-            lastSeenUid: cursor,
-            ...uidValidityUpdate,
-            lastPolledAt: new Date(),
-          },
-        });
+        await advanceImapPollCursor(credential.id, uid, uidValidityUpdate);
       }
 
       return { newMessages };
@@ -268,6 +305,8 @@ export async function pollImapAccount(
       newMessages: 0,
       error: errorMessage,
     };
+  } finally {
+    await releaseImapPoll(emailAccountId, lockedUntil);
   }
 }
 
@@ -291,11 +330,72 @@ export async function pollAllImapAccounts(
 
   log.info("Polling IMAP accounts", { count: imapAccounts.length });
 
+  const deadline = Date.now() + POLL_TIME_BUDGET_MS;
   const results: PollResult[] = [];
   for (const account of imapAccounts) {
-    const result = await pollImapAccount(account.id, log);
-    results.push(result);
+    if (Date.now() >= deadline) {
+      log.warn("Stopping IMAP poll run at the time budget", {
+        remainingAccounts: imapAccounts.length - results.length,
+      });
+      break;
+    }
+    results.push(await pollImapAccount(account.id, log, { deadline }));
   }
 
   return results;
+}
+
+/**
+ * Move the poll cursor past one handled UID and clear its strikes. The
+ * `lastSeenUid < uid` guard keeps the cursor monotonic if two runs ever race.
+ */
+async function advanceImapPollCursor(
+  credentialId: string,
+  uid: number,
+  uidValidityUpdate: { uidValidity?: bigint },
+): Promise<void> {
+  await prisma.imapCredential.updateMany({
+    where: { id: credentialId, lastSeenUid: { lt: uid } },
+    data: {
+      lastSeenUid: uid,
+      ...uidValidityUpdate,
+      lastPolledAt: new Date(),
+      pollFailureUid: null,
+      pollFailureCount: 0,
+    },
+  });
+}
+
+/**
+ * Claim the account's poll lock. Returns the expiry to release with, or null
+ * when another poll already holds it.
+ */
+async function claimImapPoll(emailAccountId: string): Promise<Date | null> {
+  const now = new Date();
+  const lockedUntil = new Date(now.getTime() + POLL_LOCK_MS);
+  const { count } = await prisma.imapCredential.updateMany({
+    where: {
+      account: { emailAccount: { id: emailAccountId } },
+      OR: [{ pollLockedUntil: null }, { pollLockedUntil: { lt: now } }],
+    },
+    data: { pollLockedUntil: lockedUntil },
+  });
+  return count === 0 ? null : lockedUntil;
+}
+
+/**
+ * Release this run's claim. A claim another run took over after ours expired
+ * is left alone.
+ */
+async function releaseImapPoll(
+  emailAccountId: string,
+  lockedUntil: Date,
+): Promise<void> {
+  await prisma.imapCredential.updateMany({
+    where: {
+      account: { emailAccount: { id: emailAccountId } },
+      pollLockedUntil: lockedUntil,
+    },
+    data: { pollLockedUntil: null },
+  });
 }
