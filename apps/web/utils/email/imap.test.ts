@@ -512,6 +512,65 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       qualifiedId("All Mail", 40),
     ]);
   });
+  it("serves a folder-scoped page from the folder-delta sync", async () => {
+    const fake = createFakeClient([
+      {
+        path: "Archive",
+        messages: [message(1, "2026-01-01"), message(2, "2026-02-01")],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getMessagesWithPagination({
+      folderId: "Archive",
+      maxResults: 20,
+    });
+
+    expect(fake.opened).toEqual(["Archive"]);
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("Archive", 1),
+      qualifiedId("Archive", 2),
+    ]);
+    expect(result.nextPageToken).toBeUndefined();
+  });
+
+  it("routes the archive view to the Archive folder sync page", async () => {
+    const fake = createFakeClient([
+      {
+        path: "Archive",
+        messages: [message(1, "2026-01-01"), message(2, "2026-02-01")],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getThreadsWithQuery({
+      query: { type: "archive" },
+      maxResults: 20,
+    });
+
+    expect(fake.opened).toEqual(["Archive"]);
+    expect(result.threads.map((t) => t.id)).toHaveLength(2);
+    expect(result.nextPageToken).toBeUndefined();
+  });
+
+  it("routes the trash view to the Trash folder sync page", async () => {
+    const fake = createFakeClient([
+      {
+        path: "Trash",
+        specialUse: "\\Trash",
+        messages: [message(1, "2026-01-01")],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getThreadsWithQuery({
+      query: { type: "trash" },
+      maxResults: 20,
+    });
+
+    expect(fake.opened).toEqual(["Trash"]);
+    expect(result.threads).toHaveLength(1);
+  });
 
   it("untrashThread on a flagged-\\All server also searches Trash", async () => {
     const root = "<trashed@x>";

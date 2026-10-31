@@ -173,11 +173,30 @@ export class ImapProvider implements EmailProvider {
     query?: string;
     maxResults?: number;
     pageToken?: string;
+    folderId?: string;
     before?: Date;
     after?: Date;
     inboxOnly?: boolean;
     unreadOnly?: boolean;
   }): Promise<{ messages: ParsedMessage[]; nextPageToken?: string }> {
+    // Folder-scoped bootstrap pages (Archived/Trash views) read from the
+    // same folder-delta sync as catch-up, so the views list what local
+    // mail holds. Query pagination keeps the old fan-out search.
+    if (options.folderId && !options.query && !options.unreadOnly) {
+      const page = await getImapMailboxSyncPage({
+        config: this.config,
+        logger: this.logger,
+        emailAccountId: this.config.emailAccountId,
+        folderId: options.folderId,
+        after: options.after ?? new Date(0),
+        cursor: options.pageToken,
+        limit: options.maxResults || 20,
+      });
+      return {
+        messages: page.upsertedMessages,
+        nextPageToken: page.hasMore ? page.cursor : undefined,
+      };
+    }
     return this.withConnection(async (client) => {
       const folders =
         options.inboxOnly === false
@@ -395,12 +414,46 @@ export class ImapProvider implements EmailProvider {
     maxResults?: number;
     pageToken?: string;
   }): Promise<{ threads: EmailThread[]; nextPageToken?: string }> {
+    const type =
+      typeof options.query === "object" ? options.query?.type : undefined;
+    const folderForType =
+      type === "archive"
+        ? "Archive"
+        : type === "trash"
+          ? "Trash"
+          : type === "spam"
+            ? "Junk"
+            : type === "sent"
+              ? "Sent"
+              : undefined;
+    // The Archived/Trash/Spam/Sent views list one special-use folder, so a
+    // folder-qualified sync page serves them without a cross-folder search.
+    if (folderForType) {
+      const { messages, nextPageToken } = await this.getMessagesWithPagination({
+        folderId: folderForType,
+        maxResults: options.maxResults,
+        pageToken: options.pageToken,
+      });
+      const threadMap = new Map<string, ParsedMessage[]>();
+      for (const msg of messages) {
+        const existing = threadMap.get(msg.threadId) || [];
+        existing.push(msg);
+        threadMap.set(msg.threadId, existing);
+      }
+      return {
+        threads: [...threadMap.entries()].map(([id, msgs]) => ({
+          id,
+          messages: msgs,
+          snippet: msgs[msgs.length - 1].snippet,
+        })),
+        nextPageToken,
+      };
+    }
     const queryStr = options.query
       ? typeof options.query === "string"
         ? options.query
         : ""
       : "";
-
     const { messages, nextPageToken } = await this.getMessagesWithPagination({
       query: queryStr,
       maxResults: options.maxResults,
