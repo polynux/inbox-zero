@@ -399,6 +399,49 @@ describe("createEmailProviderOperationExecutor", () => {
     ]);
   });
 
+  it("observes the sent message through its Message-ID when the send receipt is not a provider id", async () => {
+    vi.mocked(executeDurableEmailSend).mockResolvedValue({
+      status: "applied",
+      result: { messageId: "<smtp-1@example.com>", threadId: "t-1" },
+    });
+    const getMessage = vi.fn(async () => {
+      throw new Error("not a provider id");
+    });
+    const getMessageByRfc822MessageId = vi.fn(async () => ({
+      id: "9@U2VudA",
+      threadId: "t-1",
+      headers: { from: "me@example.com", to: "ada@example.com" },
+      labelIds: ["SENT"],
+      snippet: "Hi",
+      historyId: "Sent:9",
+      textHtml: "<p>Hi</p>",
+    }));
+    const executor = createEmailProviderOperationExecutor({
+      accountId: "acc-1",
+      provider: {
+        name: "imap",
+        getMessage,
+        getMessageByRfc822MessageId,
+      } as unknown as EmailProvider,
+    });
+    const result = await executor.execute({
+      operation: sendOperation(),
+      attemptId: "a-send-rfc822",
+      signal: new AbortController().signal,
+    });
+    expect(result.status).toBe("confirmed");
+    if (result.status !== "confirmed") throw new Error("expected confirmed");
+    expect(getMessageByRfc822MessageId).toHaveBeenCalledWith(
+      "<smtp-1@example.com>",
+    );
+    expect(result.observations).toEqual([
+      expect.objectContaining({
+        kind: "message_patch",
+        key: { accountId: "acc-1", messageId: "9@U2VudA" },
+      }),
+    ]);
+  });
+
   it("replies with a provider thread id, not an optional conversation id", async () => {
     vi.mocked(executeDurableEmailSend).mockResolvedValue({
       status: "applied",

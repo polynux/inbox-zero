@@ -29,6 +29,7 @@ const { state, prismaFake } = vi.hoisted(() => {
     validationFails: false,
     redisConfigured: false,
     lockSkipped: false,
+    notifyCalls: [] as unknown[][],
   };
 
   const prismaFake = {
@@ -147,6 +148,12 @@ vi.mock("@/utils/imap/message", () => ({
 vi.mock("@/utils/email/provider", () => ({
   createEmailProvider: async () => ({}),
 }));
+vi.mock("@/utils/mailbox-push", () => ({
+  notifyMailboxChanged: (...args: unknown[]) => {
+    state.notifyCalls.push(args);
+    return Promise.resolve();
+  },
+}));
 vi.mock("@/utils/redis/message-processing", () => ({
   withMessageProcessingLock: async (
     _key: unknown,
@@ -236,10 +243,29 @@ beforeEach(() => {
   state.validationFails = false;
   state.redisConfigured = false;
   state.lockSkipped = false;
+  state.notifyCalls = [];
   setCursor(null);
 });
 
 describe("pollImapAccount", () => {
+  it("notifies open tabs when a poll finds new mail", async () => {
+    setCursor(4);
+
+    const result = await pollImapAccount("email-account-1");
+
+    expect(result.newMessages).toBe(1);
+    expect(state.notifyCalls).toHaveLength(1);
+  });
+
+  it("stays quiet when a poll finds no new mail", async () => {
+    setCursor(5);
+
+    const result = await pollImapAccount("email-account-1");
+
+    expect(result.newMessages).toBe(0);
+    expect(state.notifyCalls).toHaveLength(0);
+  });
+
   it("reports nothing for an idle mailbox instead of its newest message", async () => {
     setCursor(5);
 

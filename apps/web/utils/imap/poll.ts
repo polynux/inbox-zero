@@ -1,6 +1,7 @@
 import { env } from "@/env";
 import { extractEmailAddress } from "@/utils/email";
 import { createEmailProvider } from "@/utils/email/provider";
+import { notifyMailboxChanged } from "@/utils/mailbox-push";
 import { withImapConnection } from "@/utils/imap/client";
 import { getImapCredentials } from "@/utils/imap/credential";
 import { encodeImapMessageId } from "@/utils/imap/message-id";
@@ -298,6 +299,13 @@ export async function pollImapAccount(
 
       return { newMessages };
     });
+
+    // Gmail/Outlook webhooks push a mailbox hint so open tabs sync now
+    // instead of waiting for the idle catch-up clock; a poll that found new
+    // INBOX mail does the same.
+    if (result.newMessages > 0) {
+      await notifyMailboxChanged({ emailAccountId, logger: log });
+    }
 
     return {
       emailAccountId,

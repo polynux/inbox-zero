@@ -938,13 +938,26 @@ async function observeSentMessage(
 ): Promise<{ observations: ProviderChange[]; bodies: BodyObservation[] }> {
   if (!messageId) return { observations: [], bodies: [] };
   try {
-    const message = await provider.getMessage(messageId);
+    const message = await readSentMessage(provider, messageId);
+    if (!message) return { observations: [], bodies: [] };
     const patch = parsedMessagePatch(accountId, provider.name, message);
     if (!patch) return { observations: [], bodies: [] };
     const body = parsedMessageBodyObservation(accountId, message);
     return { observations: [patch], bodies: body ? [body] : [] };
   } catch {
     return { observations: [], bodies: [] };
+  }
+}
+
+// SMTP sends (IMAP) return the RFC 822 Message-ID, not a provider message
+// id, so a direct read fails. Fall back to the Message-ID lookup every
+// provider implements; without an observation the sent copy waits for the
+// next catch-up instead of landing with the send.
+async function readSentMessage(provider: EmailProvider, messageId: string) {
+  try {
+    return await provider.getMessage(messageId);
+  } catch {
+    return provider.getMessageByRfc822MessageId(messageId).catch(() => null);
   }
 }
 
