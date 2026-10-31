@@ -122,7 +122,8 @@ export async function fetchRecentMessages(
  * Fetch only UID + INTERNALDATE for a set of UIDs, newest-date-first ranking
  * without pulling envelopes. UID order is append order, not date order, so
  * listings rank the full match set by date first and fetch envelopes for
- * the visible page only.
+ * the visible page only. One UID FETCH for the whole set: per-UID SEARCH +
+ * FETCH round trips turn a 3k-message mailbox into minutes.
  */
 export async function fetchInternalDatesByUids(
   client: ImapFlow,
@@ -131,34 +132,30 @@ export async function fetchInternalDatesByUids(
   if (uids.length === 0) return [];
 
   const dated: Array<{ uid: number; time: number }> = [];
-  for (const uid of uids) {
-    try {
-      // Same WorkMail-compatible UID→sequence path as fetchMessagesByUids.
-      const seqNums =
-        (await client.search({ uid: `${uid}` }, { uid: false })) || [];
-      if (seqNums.length === 0) continue;
-      const msg = await client.fetchOne(String(seqNums[0]), {
-        uid: true,
-        internalDate: true,
-      });
+  try {
+    const fetched = await client.fetchAll(
+      [...new Set(uids)],
+      { uid: true, internalDate: true },
+      { uid: true },
+    );
+    for (const msg of fetched) {
       if (!msg?.uid) continue;
       dated.push({
         uid: msg.uid,
         time: msg.internalDate ? new Date(msg.internalDate).getTime() : 0,
       });
-    } catch {
-      // A message that cannot be dated is left out of the ranking, like the
-      // envelope fetch below leaves out messages it cannot fetch.
     }
+  } catch {
+    // Messages that cannot be dated are left out of the ranking, like the
+    // envelope fetch below leaves out messages it cannot fetch.
   }
-
   return dated;
 }
 
 /**
- * Fetch multiple messages by UIDs - envelope only (no body).
- * Uses UID-based SEARCH to find each message's sequence number,
- * then fetches by sequence range (WorkMail-compatible).
+ * Fetch multiple messages by UIDs - envelope only (no body). One UID FETCH
+ * for the whole set; per-UID SEARCH + FETCH round trips scale with the page
+ * times the mailbox on listings. Returns messages in input-UID order.
  */
 export async function fetchMessagesByUids(
   client: ImapFlow,
@@ -167,46 +164,51 @@ export async function fetchMessagesByUids(
 ): Promise<ParsedMessage[]> {
   if (uids.length === 0) return [];
 
-  // Find the sequence numbers for these UIDs via SEARCH
-  // Then fetch by sequence range which works on all servers
-  const messages: ParsedMessage[] = [];
-
-  for (const uid of uids) {
-    try {
-      // SEARCH UID <uid> returns matching sequence numbers
-      const seqNums =
-        (await client.search({ uid: `${uid}` }, { uid: false })) || [];
-      if (seqNums.length === 0) continue;
-
-      const seq = seqNums[0];
-      const msg = await client.fetchOne(String(seq), {
+  let fetched: FetchMessageObject[] = [];
+  try {
+    fetched = await client.fetchAll(
+      [...new Set(uids)],
+      {
         uid: true,
         envelope: true,
         flags: true,
         bodyStructure: true,
         headers: ["references"],
-      });
-      if (msg) {
-        const parsed = await convertImapMessage(
-          msg,
-          msg.headers?.length ? parseReferencesHeader(msg.headers) : undefined,
-          client.mailbox?.path,
-          client.mailbox?.specialUse,
-        );
-        if (parsed) messages.push(parsed);
-      }
+      },
+      { uid: true },
+    );
+  } catch (error) {
+    // A failed batch fetch returns nothing: callers move/flag the returned
+    // set, so a silent partial drop would read as done.
+    log?.warn("IMAP fetch by UID failed", {
+      folder: client.mailbox?.path,
+      uids,
+      error,
+    });
+    return [];
+  }
+  const byUid = new Map<number, ParsedMessage>();
+  for (const msg of fetched) {
+    if (!msg?.uid) continue;
+    try {
+      const parsed = await convertImapMessage(
+        msg,
+        msg.headers?.length ? parseReferencesHeader(msg.headers) : undefined,
+        client.mailbox?.path,
+        client.mailbox?.specialUse,
+      );
+      if (parsed) byUid.set(msg.uid, parsed);
     } catch (error) {
-      // Skip messages that fail to fetch, but log at warn (not silently):
-      // callers move/flag the returned set, so a silent drop reads as done.
       log?.warn("IMAP fetch by UID failed", {
         folder: client.mailbox?.path,
-        uid,
+        uid: msg.uid,
         error,
       });
     }
   }
-
-  return messages;
+  return uids
+    .map((uid) => byUid.get(uid))
+    .filter((parsed): parsed is ParsedMessage => parsed !== undefined);
 }
 
 /**

@@ -95,6 +95,22 @@ function build(
       const m = mailboxes[state.opened][Number(seq) - 1];
       return m ? envelopeOf(m) : null;
     },
+    fetchAll: async (
+      range: number[] | string,
+      _query?: unknown,
+      options?: { uid?: boolean },
+    ) => {
+      const list = mailboxes[state.opened];
+      const ids = Array.isArray(range)
+        ? range
+        : String(range).split(",").map(Number);
+      return ids.flatMap((id) => {
+        const m = options?.uid
+          ? list.find((item) => item.uid === id)
+          : list[id - 1];
+        return m ? [envelopeOf(m)] : [];
+      });
+    },
     search: async (criteria: Record<string, unknown>) => {
       const list = mailboxes[state.opened];
       if (criteria.uid !== undefined) {

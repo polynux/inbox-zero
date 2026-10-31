@@ -1,3 +1,4 @@
+import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImapMessageNotFoundError, ImapProvider } from "@/utils/email/imap";
 import * as mailModule from "@/utils/imap/mail";
@@ -372,6 +373,38 @@ function createFakeClient(
         },
       };
     }),
+    fetchAll: vi.fn(
+      async (
+        range: number[] | string,
+        query?: Record<string, unknown>,
+        options?: { uid?: boolean },
+      ) => {
+        fetchQueries.push(query);
+        const uids = Array.isArray(range)
+          ? range
+          : String(range)
+              .split(",")
+              .flatMap((part) => {
+                const [start, end] = part.split(":").map(Number);
+                if (Number.isNaN(end)) return [start];
+                const last = part.endsWith("*")
+                  ? Math.max(...current.messages.map((m) => m.uid), 0)
+                  : end;
+                return Array.from(
+                  { length: last - start + 1 },
+                  (_, index) => start + index,
+                );
+              });
+        return uids.flatMap((uid) => {
+          const found = options?.uid
+            ? current.messages.find((item) => item.uid === uid)
+            : current.messages[uid - 1];
+          if (!found) return [];
+          fetchedUids.push(found.uid);
+          return [fetched(found, query)];
+        });
+      },
+    ),
     download: vi.fn(
       async (range: string, _part?: string, options?: { uid?: boolean }) => {
         const pick = options?.uid
@@ -958,6 +991,45 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     expect(seen).toEqual(
       [1, 3, 5, 7, 9, 10, 8, 6, 4, 2].map((uid) => qualifiedId("INBOX", uid)),
     );
+  });
+
+  // Live: dating every match with per-UID SEARCH + FETCH round trips took
+  // ~190 s on a 3k-message INBOX. One UID FETCH per listing step instead.
+  it("dates and envelopes each page with one batched fetch", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: Array.from({ length: 10 }, (_, index) =>
+          message(index + 1, `2026-01-${String(index + 1).padStart(2, "0")}`),
+        ),
+      },
+    ]);
+    connection.client = fake.client;
+
+    const page = await new ImapProvider(config).getMessagesWithPagination({
+      maxResults: 3,
+    });
+
+    expect(page.messages).toHaveLength(3);
+    const fetchAll = fake.client.fetchAll as unknown as {
+      mock: { calls: unknown[][] };
+    };
+    const fetchOne = fake.client.fetchOne as unknown as {
+      mock: { calls: unknown[][] };
+    };
+    expect(fetchAll.mock.calls).toHaveLength(2);
+    expect(fetchOne.mock.calls).toHaveLength(0);
+    const search = fake.client.search as unknown as {
+      mock: { calls: unknown[][] };
+    };
+    expect(
+      search.mock.calls.filter(
+        ([criteria]) =>
+          typeof criteria === "object" &&
+          criteria !== null &&
+          "uid" in criteria,
+      ),
+    ).toHaveLength(0);
   });
 });
 

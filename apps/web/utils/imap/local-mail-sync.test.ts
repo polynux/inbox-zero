@@ -16,6 +16,20 @@ vi.mock("@/utils/imap/client", () => ({
 
 const MESSAGE_DATE = new Date("2026-01-01T00:00:00Z");
 
+function fetchedOf(uid: number) {
+  return {
+    uid,
+    envelope: {
+      from: [{ name: "Sender", address: "sender@example.com" }],
+      to: [{ name: "Me", address: "me@example.com" }],
+      subject: `Subject ${uid}`,
+      date: MESSAGE_DATE,
+      messageId: `<${uid}@example.com>`,
+    },
+    flags: new Set(["\\Seen"]),
+  };
+}
+
 let mailboxUids: number[];
 let uidValidity: number | undefined;
 
@@ -50,18 +64,24 @@ const stubClient: { mailbox: { path?: string } } & Record<string, unknown> = {
   fetchOne: vi.fn(async (seq: string) => {
     const uid = mailboxUids[Number(seq) - 1];
     if (uid === undefined) return false;
-    return {
-      uid,
-      envelope: {
-        from: [{ name: "Sender", address: "sender@example.com" }],
-        to: [{ name: "Me", address: "me@example.com" }],
-        subject: `Subject ${uid}`,
-        date: MESSAGE_DATE,
-        messageId: `<${uid}@example.com>`,
-      },
-      flags: new Set(["\\Seen"]),
-    };
+    return fetchedOf(uid);
   }),
+  fetchAll: vi.fn(
+    async (
+      range: number[] | string,
+      _query?: unknown,
+      options?: { uid?: boolean },
+    ) => {
+      const uids = (
+        Array.isArray(range) ? range : String(range).split(",").map(Number)
+      ).flatMap((uid) =>
+        options?.uid ? [uid] : [mailboxUids[uid - 1]].filter(Boolean),
+      );
+      return uids.flatMap((uid) =>
+        mailboxUids.includes(uid) ? [fetchedOf(uid)] : [],
+      );
+    },
+  ),
 };
 
 const baseInput = {
