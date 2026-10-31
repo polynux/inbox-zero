@@ -20,6 +20,7 @@ import { logErrorWithDedupe } from "@/utils/log-error-with-dedupe";
 import type { Prisma } from "@/generated/prisma/client";
 import {
   isGoogleProvider,
+  isImapProvider,
   isMicrosoftProvider,
 } from "@/utils/email/provider-types";
 
@@ -274,9 +275,11 @@ export async function validateWebhookAccount(
     return { success: false, response: NextResponse.json({ ok: true }) };
   }
 
+  // IMAP authenticates with the stored credential, never OAuth tokens.
   if (
-    !emailAccount.account?.access_token ||
-    !emailAccount.account?.refresh_token
+    !isImapProvider(emailAccount.account?.provider) &&
+    (!emailAccount.account?.access_token ||
+      !emailAccount.account?.refresh_token)
   ) {
     logger.error("Missing access or refresh token");
     return { success: false, response: NextResponse.json({ ok: true }) };

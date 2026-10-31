@@ -330,6 +330,28 @@ describe("validateWebhookAccount", () => {
     });
   });
 
+  describe("when an IMAP account has no OAuth tokens", () => {
+    it("should succeed using the stored IMAP credential", async () => {
+      const emailAccount = createMockEmailAccount({
+        account: {
+          provider: "imap",
+          access_token: null,
+          refresh_token: null,
+          expires_at: new Date(),
+          disconnectedAt: null,
+        },
+      });
+
+      vi.mocked(isPremiumRecord).mockReturnValue(true);
+      vi.mocked(hasAiAccess).mockReturnValue(true);
+
+      const result = await validateWebhookAccount(emailAccount, logger);
+
+      expect(result.success).toBe(true);
+      expect(unwatchEmails).not.toHaveBeenCalled();
+    });
+  });
+
   describe("when all validation passes", () => {
     it("should return success with validated data", async () => {
       const emailAccount = createMockEmailAccount();
