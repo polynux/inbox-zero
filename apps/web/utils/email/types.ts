@@ -500,6 +500,13 @@ export interface EmailProvider {
     draftId: string,
     attachment: DraftAttachmentMetadata,
   ): Promise<DraftAttachmentUploadStart>;
+  /**
+   * True when "label" means a detached tag (Gmail labels, Outlook
+   * categories, Proton Bridge Labels/*) rather than the message's folder.
+   * The UI cannot LIST from the browser, so it reads this per-account flag
+   * from the provider instead of sniffing the provider type.
+   */
+  supportsLabels?(): Promise<boolean>;
   syncLocalMail(
     request: LocalMailSyncRequest,
     context: { emailAccountId: string },

@@ -14,6 +14,9 @@ vi.mock("@/providers/EmailAccountProvider", () => ({
   useAccount: () => mockUseAccount(),
 }));
 
+vi.mock("@/utils/actions/mail", () => ({
+  supportsLabelsAction: vi.fn(),
+}));
 describe("useLabels", () => {
   beforeEach(() => {
     vi.clearAllMocks();

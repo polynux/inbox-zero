@@ -14,10 +14,13 @@ import {
 } from "@/components/ui/command";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import { useFolders } from "@/hooks/useFolders";
-import { useLabels } from "@/hooks/useLabels";
+import { useLabels, useSupportsLabels } from "@/hooks/useLabels";
 import { useAccount } from "@/providers/EmailAccountProvider";
 import { createLabelAction } from "@/utils/actions/mail";
-import { isMicrosoftProvider } from "@/utils/email/provider-types";
+import {
+  isImapProvider,
+  isMicrosoftProvider,
+} from "@/utils/email/provider-types";
 import { getActionErrorMessage } from "@/utils/error";
 import {
   FOLDER_SEPARATOR,
@@ -51,7 +54,15 @@ export function LabelPickerDialog({
   const client = useOptionalMailClient();
   const isMove = mode === "move";
   // Outlook categories don't change where a message lives, so moves target real folders.
-  const isFolderMove = isMove && isMicrosoftProvider(provider);
+  // Plain IMAP has no label namespace either ("label" is a MOVE there), so
+  // only Bridge Labels/* accounts get label UI; provider says which.
+  const { supportsLabels } = useSupportsLabels(emailAccountId);
+  // A Bridge Labels/* move still detaches (label + archive); a plain IMAP
+  // move has no detached label to apply, so it targets folders directly.
+  const isFolderMove =
+    isMove &&
+    (isMicrosoftProvider(provider) ||
+      (isImapProvider(provider) && !supportsLabels));
   const {
     userLabels,
     isLoading: isLoadingLabels,

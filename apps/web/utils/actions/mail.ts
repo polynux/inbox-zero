@@ -240,6 +240,24 @@ export const deleteFilterAction = actionClient
     },
   );
 
+export const supportsLabelsAction = actionClient
+  .metadata({ name: "supportsLabels" })
+  .inputSchema(z.object({}))
+  .action(async ({ ctx: { emailAccountId, provider, logger } }) => {
+    // Gmail/Outlook always detach labels; only IMAP varies (Bridge
+    // Labels/* vs plain folders), so only it pays for a LIST probe.
+    if (isGoogleProvider(provider) || isMicrosoftProvider(provider))
+      return { supportsLabels: true };
+    const emailProvider = await createEmailProvider({
+      emailAccountId,
+      provider,
+      logger,
+    });
+    return {
+      supportsLabels: (await emailProvider.supportsLabels?.()) ?? false,
+    };
+  });
+
 export const createLabelAction = actionClient
   .metadata({ name: "createLabel" })
   .inputSchema(

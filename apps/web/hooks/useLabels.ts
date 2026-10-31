@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import useSWR from "swr";
 import type { LabelsResponse } from "@/app/api/labels/route";
 import type { EmailLabel } from "@/providers/email-label-types";
 import { useAccount } from "@/providers/EmailAccountProvider";
 import { compareLabelsByName } from "@/utils/label/compare-labels";
+import { supportsLabelsAction } from "@/utils/actions/mail";
 
 export type UserLabel = {
   id: string;
@@ -47,6 +48,48 @@ function useLabelsResponse(explicitEmailAccountId?: string) {
   return {
     ...swr,
     isLoading: isLoadingEmailAccount || swr.isLoading,
+  };
+}
+/**
+ * Whether "label" detaches a tag on this account (Gmail, Outlook, Proton
+ * Bridge Labels/*) or moves the message (plain IMAP folders). The UI cannot
+ * LIST from the browser, so this probes the provider once per account.
+ */
+export function useSupportsLabels(emailAccountId?: string) {
+  const { provider } = useAccount();
+  const [supportsLabels, setSupportsLabels] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!emailAccountId) {
+      setSupportsLabels(null);
+      return;
+    }
+    // Gmail/Outlook always detach labels; only IMAP varies (Bridge
+    // Labels/* vs plain folders), so only it pays for a LIST probe.
+    if (provider === "google" || provider === "microsoft") {
+      setSupportsLabels(true);
+      return;
+    }
+    if (provider !== "imap") {
+      setSupportsLabels(false);
+      return;
+    }
+    let cancelled = false;
+    setSupportsLabels(null);
+    supportsLabelsAction(emailAccountId, {})
+      .then((result) => {
+        if (!cancelled)
+          setSupportsLabels(result?.data?.supportsLabels ?? false);
+      })
+      .catch(() => {
+        if (!cancelled) setSupportsLabels(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [emailAccountId, provider]);
+  return {
+    supportsLabels: supportsLabels ?? false,
+    isLoading: supportsLabels === null,
   };
 }
 

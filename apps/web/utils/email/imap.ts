@@ -596,6 +596,12 @@ export class ImapProvider implements EmailProvider {
     });
   }
 
+  // The UI cannot LIST from the browser, so it asks the provider whether
+  // "label" detaches (Proton Bridge Labels/*) or moves (plain IMAP folders).
+  async supportsLabels(): Promise<boolean> {
+    return this.withConnection((client) => isProtonBridgeLayout(client));
+  }
+
   async getLabelById(labelId: string): Promise<EmailLabel | null> {
     const labels = await this.getLabels();
     return labels.find((l) => l.id === labelId) || null;

@@ -13,16 +13,25 @@ import { LabelPickerDialog } from "./LabelPickerDialog";
 
 (globalThis as { React?: typeof React }).React = React;
 
-const { mockUseAccount, mockUseLabels, mockUseFolders, mockClient } =
-  vi.hoisted(() => ({
-    mockUseAccount: vi.fn(),
-    mockUseLabels: vi.fn(),
-    mockUseFolders: vi.fn(),
-    mockClient: {
-      getDiagnostics: vi.fn(),
-      submitConversations: vi.fn(),
-    },
-  }));
+const {
+  mockUseAccount,
+  mockUseLabels,
+  mockUseFolders,
+  mockSupportsLabels,
+  mockClient,
+} = vi.hoisted(() => ({
+  mockUseAccount: vi.fn(),
+  mockUseLabels: vi.fn(),
+  mockUseFolders: vi.fn(),
+  mockSupportsLabels: vi.fn(() => ({
+    supportsLabels: true,
+    isLoading: false,
+  })),
+  mockClient: {
+    getDiagnostics: vi.fn(),
+    submitConversations: vi.fn(),
+  },
+}));
 
 vi.mock("@/providers/EmailAccountProvider", () => ({
   useAccount: () => mockUseAccount(),
@@ -30,6 +39,8 @@ vi.mock("@/providers/EmailAccountProvider", () => ({
 
 vi.mock("@/hooks/useLabels", () => ({
   useLabels: () => mockUseLabels(),
+  useSupportsLabels: (...args: unknown[]) =>
+    (mockSupportsLabels as unknown as (...a: unknown[]) => unknown)(...args),
 }));
 
 vi.mock("@/hooks/useFolders", () => ({
@@ -67,6 +78,10 @@ if (!HTMLElement.prototype.scrollIntoView) {
 
 describe("LabelPickerDialog", () => {
   beforeEach(() => {
+    mockSupportsLabels.mockImplementation(() => ({
+      supportsLabels: true,
+      isLoading: false,
+    }));
     mockUseLabels.mockReturnValue({
       userLabels: [{ id: "category-1", name: "Category One", type: "user" }],
       isLoading: false,
@@ -116,6 +131,38 @@ describe("LabelPickerDialog", () => {
     expect(screen.queryByText("Category One")).toBeNull();
     expect(screen.queryByText("Inbox")).toBeNull();
     expect(screen.getByText("Inbox / Nested")).toBeTruthy();
+    fireEvent.click(screen.getByText("Projects"));
+
+    await waitFor(() => expect(onApplied).toHaveBeenCalled());
+    expect(mockClient.submitConversations).toHaveBeenCalledTimes(1);
+    expect(mockClient.submitConversations).toHaveBeenCalledWith(
+      expect.objectContaining({
+        change: { kind: "move", folderId: "folder-id" },
+      }),
+    );
+  });
+
+  it("moves plain IMAP conversations into a mail folder instead of a label", async () => {
+    mockUseAccount.mockReturnValue({
+      emailAccountId: "account-1",
+      provider: "imap",
+    });
+    mockSupportsLabels.mockImplementation(() => ({
+      supportsLabels: false,
+      isLoading: false,
+    }));
+    const onApplied = vi.fn();
+
+    render(
+      <LabelPickerDialog
+        mode="move"
+        threadIds={["thread-1"]}
+        onClose={vi.fn()}
+        onApplied={onApplied}
+      />,
+    );
+
+    expect(screen.getByText("Projects")).toBeTruthy();
     fireEvent.click(screen.getByText("Projects"));
 
     await waitFor(() => expect(onApplied).toHaveBeenCalled());

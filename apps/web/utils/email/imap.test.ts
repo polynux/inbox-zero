@@ -2067,6 +2067,20 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
     expect(copied).toEqual([{ uid: 1, to: "Labels/New" }]);
     expect(mailboxesOf(fake).INBOX).toHaveLength(1);
   });
+  it("reports label support on the Bridge layout only", async () => {
+    const bridge = createFakeClient(protonMailboxes());
+    connection.client = bridge.client;
+    await expect(new ImapProvider(config).supportsLabels()).resolves.toBe(true);
+
+    const plain = createFakeClient([
+      { path: "INBOX", messages: [] },
+      { path: "Archive", messages: [] },
+    ]);
+    connection.client = plain.client;
+    await expect(new ImapProvider(config).supportsLabels()).resolves.toBe(
+      false,
+    );
+  });
 
   it("removes a label by expunging only from Labels/X, keeping INBOX", async () => {
     const root = message(1, "2026-01-01", "a@x.com", undefined, {

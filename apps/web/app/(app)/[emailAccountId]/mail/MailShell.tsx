@@ -97,13 +97,14 @@ import {
 } from "@/providers/EmailAccountProvider";
 import {
   isGoogleProvider,
+  isImapProvider,
   isMicrosoftProvider,
 } from "@/utils/email/provider-types";
 import { getOpenInMailboxLabel } from "@/utils/url";
 import { useEmailLabels } from "@/providers/EmailLabelsProvider";
 import { undoLatestToast } from "@/components/Toast";
 import { useDisplayedEmail } from "@/hooks/useDisplayedEmail";
-import { useLabels } from "@/hooks/useLabels";
+import { useLabels, useSupportsLabels } from "@/hooks/useLabels";
 import { useFolders } from "@/hooks/useFolders";
 import { useMailSettings } from "@/hooks/useMailSettings";
 import { useAccounts } from "@/hooks/useAccounts";
@@ -114,7 +115,6 @@ import type { ShortcutHandlers } from "@/lib/shortcuts/registry";
 import { updateMailPreferencesAction } from "@/utils/actions/mail-split";
 import type { UpdateMailPreferencesBody } from "@/utils/actions/mail-split.validation";
 import { submitConversationChange } from "@/utils/mail-engine/submit-conversations";
-import { admissionRejectionCopy } from "@/utils/mail-engine/admission-notice";
 import {
   getPortableLabelSplits,
   OTHER_SPLIT_ID,
@@ -135,7 +135,7 @@ import { getEmailMessageCellActions } from "@/components/EmailMessageCellActions
 import type { ThreadsQuery } from "@/utils/threads/validation";
 import { getConversationSubject } from "@/utils/email/subject";
 import { printMessages } from "@/app/(app)/[emailAccountId]/mail/print-messages";
-
+import { admissionRejectionCopy } from "@/utils/mail-engine/admission-notice";
 // Module-level so an "empty" reader doesn't hand children a new array each render.
 const NO_MESSAGES: ThreadMessage[] = [];
 const NO_LABELS = {};
@@ -1025,11 +1025,16 @@ export function MailShell() {
       : accountsData?.emailAccounts.find(
           (account) => account.id === labelAccountId,
         );
-  // Outlook categories use the same engine membership command as Gmail labels.
+  // Gmail labels, Outlook categories, and Proton Bridge Labels/* all ride
+  // the same engine membership command; plain IMAP folders stay a move.
+  const { supportsLabels: labelAccountSupportsLabels } =
+    useSupportsLabels(labelAccountId);
   const canLabel =
     currentLabelTargets.length > 0 &&
     (isGoogleProvider(labelAccount?.account.provider) ||
-      isMicrosoftProvider(labelAccount?.account.provider)) &&
+      isMicrosoftProvider(labelAccount?.account.provider) ||
+      (isImapProvider(labelAccount?.account.provider) &&
+        labelAccountSupportsLabels)) &&
     currentLabelTargets.every(
       (target) => target.emailAccountId === labelAccountId,
     );
