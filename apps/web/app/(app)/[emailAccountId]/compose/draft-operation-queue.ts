@@ -24,3 +24,6 @@ export function enqueueDraftOperation<T>(
 export async function waitForDraftOperations(key: string) {
   await queues.get(key);
 }
+
+// Send uses the same per-session queue, so an autosave already queued when
+// Send is pressed drains first and the send reads the draft id it stored.

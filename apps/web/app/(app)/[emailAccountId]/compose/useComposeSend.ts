@@ -32,7 +32,10 @@ import {
   resolveComposeRecipientFields,
 } from "./compose-recipients";
 import { parseDeliveryTimes } from "./delivery-times";
-import { waitForDraftOperations } from "./draft-operation-queue";
+import {
+  enqueueDraftOperation,
+  waitForDraftOperations,
+} from "./draft-operation-queue";
 import type { createInitialComposeContent } from "./initial-compose-content";
 import {
   queueReaderEmail,
@@ -217,7 +220,14 @@ export function useComposeSend({
         }
       }
       setSubmissionError("");
-      await stopProviderAutosave();
+      // Send shares the compose session's draft queue, so an autosave that is
+      // in flight when Send is pressed finishes first and Send reads the
+      // draft id it stored. stopProviderAutosave only pauses future ticks, so
+      // waiting alone still lets a queued save slip between the wait and the
+      // read below.
+      await enqueueDraftOperation(draftQueueKey, async () => {
+        await stopProviderAutosave();
+      });
       let deliveryAccepted = false;
       try {
         // Autosave can replace a draft's message ID; its provider draft ID survives.
