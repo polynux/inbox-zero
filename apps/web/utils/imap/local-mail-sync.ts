@@ -9,6 +9,7 @@ import type { MailboxSyncPage } from "@/utils/email/types";
 import { withLocalMailSyncBudget } from "@/utils/email/local-mail-sync-budget";
 import { withImapConnection } from "@/utils/imap/client";
 import { listFoldersAsOutlookFolders } from "@/utils/imap/folder";
+import { encodeImapMessageId } from "@/utils/imap/message-id";
 import { fetchMessagesByUids, searchImapMessages } from "@/utils/imap/message";
 import type { ImapCredentialConfig } from "@/utils/imap/types";
 import type { Logger } from "@/utils/logger";
@@ -18,6 +19,7 @@ const cursorPayloadSchema = z.object({
   folder: z.string().min(1),
   uidValidity: z.number().int().optional(),
   lastUid: z.number().int().nonnegative(),
+  knownUids: z.string().optional(),
 });
 
 function encodeImapCursor(
@@ -25,11 +27,12 @@ function encodeImapCursor(
   folder: string,
   uidValidity: number | undefined,
   lastUid: number,
+  knownUids: string | undefined,
 ): string {
   return encodeMailboxSyncCursor({
     version: 1,
     provider: "imap",
-    state: { emailAccountId, folder, uidValidity, lastUid },
+    state: { emailAccountId, folder, uidValidity, lastUid, knownUids },
   });
 }
 
@@ -43,9 +46,12 @@ type SyncInput = {
 
 /**
  * UID-based folder-delta sync for IMAP. The cursor tracks the highest seen
- * UID per folder; UIDVALIDITY changes invalidate it (server-side UID reset).
- * Deleted/expunged messages are not reported: IMAP has no tombstone feed,
- * so removals only surface as a full reset when UIDVALIDITY changes.
+ * UID per folder plus a compact range-set of the UIDs the local mailbox holds;
+ * UIDVALIDITY changes invalidate it (server-side UID reset).
+ *
+ * IMAP has no tombstone feed (Bridge advertises neither CONDSTORE nor QRESYNC),
+ * so a delta page compares `UID SEARCH ALL` against that range-set and reports
+ * the missing UIDs as deleted.
  */
 export async function getImapMailboxSyncPage(
   input: SyncInput & {
@@ -92,7 +98,9 @@ export async function getImapMailboxSyncPage(
         uidValidity,
         uidNext,
         lastUid: payload.lastUid,
+        knownUids: payload.knownUids,
         emailAccountId: input.emailAccountId,
+        logger: input.logger,
       });
     }
 
@@ -117,9 +125,36 @@ async function getImapDeltaPage(
     uidValidity: number | undefined;
     uidNext: number;
     lastUid: number;
+    knownUids: string | undefined;
     emailAccountId: string;
+    logger: Logger;
   },
 ): Promise<MailboxSyncPage> {
+  // UID-only search, so the diff below costs one round trip and no fetches.
+  const serverUids = await searchImapMessages(client, { all: true });
+  const serverUidSet = new Set(serverUids);
+  // A cursor written before knownUids existed bootstraps from the server's
+  // current UIDs: reporting a deletion the local mailbox never received is a
+  // harmless no-op, while missing one would leave stale mail behind.
+  const knownUidSet =
+    options.knownUids === undefined
+      ? new Set(serverUids)
+      : parseUidRanges(options.knownUids);
+  const deletedMessageIds = [...knownUidSet]
+    .filter((uid) => !serverUidSet.has(uid))
+    .sort((a, b) => a - b)
+    .map((uid) => encodeImapMessageId(options.folder, uid));
+
+  if (deletedMessageIds.length > 0) {
+    options.logger.info("IMAP folder delta reports deleted messages", {
+      emailAccountId: options.emailAccountId,
+      folder: options.folder,
+      count: deletedMessageIds.length,
+    });
+  }
+
+  const knownUids = formatUidRanges(serverUids);
+
   if (options.uidNext <= options.lastUid + 1) {
     return {
       cursor: encodeImapCursor(
@@ -127,8 +162,9 @@ async function getImapDeltaPage(
         options.folder,
         options.uidValidity,
         options.lastUid,
+        knownUids,
       ),
-      deletedMessageIds: [],
+      deletedMessageIds,
       hasMore: false,
       reset: false,
       upsertedMessages: [],
@@ -160,8 +196,9 @@ async function getImapDeltaPage(
       options.folder,
       options.uidValidity,
       maxUid,
+      knownUids,
     ),
-    deletedMessageIds: [],
+    deletedMessageIds,
     hasMore: newUids.length > pageUids.length,
     reset: false,
     upsertedMessages: messages,
@@ -197,6 +234,7 @@ async function getImapSnapshotPage(
       options.folder,
       options.uidValidity,
       maxUid,
+      formatUidRanges(allUids),
     ),
     deletedMessageIds: [],
     hasMore: allUids.length > pageUids.length,
@@ -234,4 +272,51 @@ export async function getImapMailFoldersPage(
         };
       }),
   );
+}
+
+// Compact range-set for the cursor: ascending UIDs grouped into "a-b" runs.
+function formatUidRanges(uids: number[]): string {
+  const sorted = [...uids].sort((a, b) => a - b);
+  const ranges: string[] = [];
+  let start: number | undefined;
+  let end: number | undefined;
+
+  for (const uid of sorted) {
+    if (start === undefined || end === undefined) {
+      start = uid;
+      end = uid;
+    } else if (uid === end + 1) {
+      end = uid;
+    } else {
+      ranges.push(start === end ? `${start}` : `${start}-${end}`);
+      start = uid;
+      end = uid;
+    }
+  }
+  if (start !== undefined && end !== undefined) {
+    ranges.push(start === end ? `${start}` : `${start}-${end}`);
+  }
+
+  return ranges.join(",");
+}
+
+function parseUidRanges(ranges: string): Set<number> {
+  const uids = new Set<number>();
+
+  for (const part of ranges.split(",")) {
+    if (!part) continue;
+    const [startText, endText] = part.split("-");
+    const start = Number(startText);
+    const end = endText === undefined ? start : Number(endText);
+    if (
+      !Number.isInteger(start) ||
+      !Number.isInteger(end) ||
+      start < 1 ||
+      end < start
+    )
+      continue;
+    for (let uid = start; uid <= end; uid++) uids.add(uid);
+  }
+
+  return uids;
 }

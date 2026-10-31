@@ -172,6 +172,56 @@ describe("getImapMailboxSyncPage", () => {
     ]);
   });
 
+  it("reports an expunged UID as a deleted message id", async () => {
+    const first = await getImapMailboxSyncPage({
+      ...baseInput,
+      after: new Date("2025-01-01T00:00:00Z"),
+    });
+
+    mailboxUids = [1, 2, 4, 5];
+
+    const page = await getImapMailboxSyncPage({
+      ...baseInput,
+      cursor: first.cursor,
+    });
+
+    expect(page.deletedMessageIds).toEqual([qualifiedId(3)]);
+    expect(lastUidOf(page.cursor)).toBe(5);
+  });
+
+  it("reports deletions even when no new mail arrived", async () => {
+    const first = await getImapMailboxSyncPage({
+      ...baseInput,
+      after: new Date("2025-01-01T00:00:00Z"),
+      limit: 5,
+    });
+
+    mailboxUids = [1, 2, 3, 4];
+
+    const page = await getImapMailboxSyncPage({
+      ...baseInput,
+      cursor: first.cursor,
+    });
+
+    expect(page.upsertedMessages).toEqual([]);
+    expect(page.deletedMessageIds).toEqual([qualifiedId(5)]);
+    expect(lastUidOf(page.cursor)).toBe(5);
+  });
+
+  it("reports no deletions when the mailbox is unchanged", async () => {
+    const first = await getImapMailboxSyncPage({
+      ...baseInput,
+      after: new Date("2025-01-01T00:00:00Z"),
+    });
+
+    const page = await getImapMailboxSyncPage({
+      ...baseInput,
+      cursor: first.cursor,
+    });
+
+    expect(page.deletedMessageIds).toEqual([]);
+  });
+
   it("rejects cursors from another account or folder", async () => {
     const first = await getImapMailboxSyncPage({
       ...baseInput,

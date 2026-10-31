@@ -27,6 +27,9 @@ const imapCursorSchema = z.object({
     folder: z.string().min(1),
     uidValidity: z.number().int().optional(),
     lastUid: z.number().int().nonnegative(),
+    // Compact range-set ("1-40,44") of the UIDs the local mailbox holds, so a
+    // later delta page can report server-side expunges.
+    knownUids: z.string().optional(),
   }),
 });
 
