@@ -2,6 +2,7 @@ import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ImapProvider } from "@/utils/email/imap";
 import * as mailModule from "@/utils/imap/mail";
+import { encodeImapMessageId } from "@/utils/imap/message-id";
 import { buildThreadId } from "@/utils/imap/thread";
 const connection = vi.hoisted(() => ({ client: null as unknown }));
 vi.mock("@/utils/imap/client", () => ({
@@ -76,13 +77,31 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
 
   // The real ENVELOPE never carries References: it arrives via a
   // HEADER.FIELDS fetch (listings, thread resolution) or the full download
-  // (getMessage). The fake surfaces it as a raw header buffer the same way.
-  function headersOf(message: FakeMessage): Buffer | undefined {
+  // (getMessage). The fake surfaces it as a raw header buffer, but only when
+  // the FETCH query asked for headers — otherwise this class of bug (a fetch
+  // path that forgets `headers: ["references"]`) stays invisible.
+  function headersOf(
+    message: FakeMessage,
+    query?: Record<string, unknown>,
+  ): Buffer | undefined {
     if (!message.references) return;
+    const wanted =
+      Array.isArray(query?.headers) &&
+      query.headers.some(
+        (header) => String(header).toLowerCase() === "references",
+      );
+    if (!wanted) return;
     return Buffer.from(`References: ${message.references}\r\n`);
   }
 
-  function fetched(message: FakeMessage) {
+  function fetched(message: FakeMessage, query?: Record<string, unknown>) {
+    const bodyStructure = (query as { bodyStructure?: unknown } | undefined)
+      ?.bodyStructure
+      ? {
+          part: "",
+          childNodes: [{ part: "2", type: "application/octet-stream" }],
+        }
+      : undefined;
     return {
       uid: message.uid,
       envelope: {
@@ -94,7 +113,8 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
         inReplyTo: message.inReplyTo,
       },
       flags: new Set<string>(),
-      headers: headersOf(message),
+      headers: headersOf(message, query),
+      bodyStructure,
     };
   }
 
@@ -192,12 +212,14 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
         return current.messages.map((item) => item.uid);
       },
     ),
-    fetchOne: vi.fn(async (sequence: string) => {
-      const message = current.messages[Number(sequence) - 1];
-      if (!message) return null;
-      fetchedUids.push(message.uid);
-      return fetched(message);
-    }),
+    fetchOne: vi.fn(
+      async (sequence: string, query?: Record<string, unknown>) => {
+        const message = current.messages[Number(sequence) - 1];
+        if (!message) return null;
+        fetchedUids.push(message.uid);
+        return fetched(message, query);
+      },
+    ),
     messageMove: vi.fn(async (uid: string, folder: string) => {
       const index = current.messages.findIndex(
         (item) => item.uid === Number(uid),
@@ -215,7 +237,7 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       const page = current.messages.slice(Number.parseInt(start, 10) - 1, last);
       return {
         async *[Symbol.asyncIterator]() {
-          for (const item of page) yield fetched(item);
+          for (const item of page) yield fetched(item, query);
         },
       };
     }),
@@ -281,6 +303,42 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
     for (const query of fake.fetchQueries) {
       expect(query).toMatchObject({ bodyStructure: true });
     }
+  });
+
+  it("fetches References in the simple listing so a depth-2 reply keeps the root thread id", async () => {
+    const root = "<r@x>";
+    const rootThreadId = buildThreadId(undefined, undefined, root);
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, { messageId: root }),
+          message(2, "2026-01-02", "owner@example.com", undefined, {
+            messageId: "<m1@x>",
+            inReplyTo: root,
+            references: root,
+          }),
+          message(3, "2026-01-03", "alice@x", undefined, {
+            messageId: "<m2@x>",
+            inReplyTo: "<m1@x>",
+            references: `${root} <m1@x>`,
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const listing = await new ImapProvider(config).getMessagesWithPagination(
+      {},
+    );
+    for (const query of fake.fetchQueries) {
+      expect(query).toMatchObject({ headers: ["references"] });
+    }
+    const listedM2 = listing.messages.find((m) => m.subject === "message 3");
+    expect(listedM2?.threadId).toBe(rootThreadId);
+
+    const thread = await new ImapProvider(config).getThread(rootThreadId);
+    expect(thread.messages).toHaveLength(3);
   });
 
   it("searches only the \\All mailbox when the server lists one", async () => {
