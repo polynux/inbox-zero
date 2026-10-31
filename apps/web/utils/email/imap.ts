@@ -1743,9 +1743,11 @@ ${messageContent}
     const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
       await client.mailboxOpen(folder, { readOnly: true });
-      const listed = await client.fetchOne(String(uid), {
-        bodyStructure: true,
-      });
+      const listed = await client.fetchOne(
+        String(uid),
+        { bodyStructure: true },
+        { uid: true },
+      );
       if (!findBodyPart(listed?.bodyStructure, attachmentId))
         throw new SafeError(
           `Attachment part ${attachmentId} not found on message ${messageId}`,

@@ -213,8 +213,15 @@ function createFakeClient(mailboxes: FakeMailbox[]) {
       },
     ),
     fetchOne: vi.fn(
-      async (sequence: string, query?: Record<string, unknown>) => {
-        const message = current.messages[Number(sequence) - 1];
+      async (
+        range: string,
+        query?: Record<string, unknown>,
+        options?: { uid?: boolean },
+      ) => {
+        // Like download: a UID range resolves by UID, otherwise by position.
+        const message = options?.uid
+          ? current.messages.find((item) => item.uid === Number(range))
+          : current.messages[Number(range) - 1];
         if (!message) return null;
         fetchedUids.push(message.uid);
         return fetched(message, query);
@@ -2107,6 +2114,28 @@ describe("ImapProvider attachment edge cases", () => {
           (error: Error) => error.message,
         ),
     ).resolves.toMatch(/not found/i);
+  });
+
+  it("finds the attachment by UID when uid differs from sequence number", async () => {
+    // UID 7 sits at sequence 2; a sequence-number fetch would read the
+    // wrong message (or none) for the BODYSTRUCTURE check.
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [message(3, "2026-01-01"), message(7, "2026-01-02")],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const attachment = await new ImapProvider(config).getAttachment(
+      qualifiedId("INBOX", 7),
+      "2",
+    );
+    expect(Buffer.from(attachment.data, "base64").toString("utf8")).toContain(
+      "body of message 7",
+    );
+    expect(fake.fetchedUids).toEqual([7]);
+    expect(fake.client.download).toHaveBeenCalledWith("7", "2", { uid: true });
   });
 
   it("a legitimately empty part downloads as empty bytes without throwing", async () => {
