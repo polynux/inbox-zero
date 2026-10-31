@@ -96,7 +96,7 @@ function knownUidsOf(cursor: string): string | undefined {
   return decoded.state.knownUids;
 }
 
-function cursorAt(lastUid: number): string {
+function cursorAt(lastUid: number, knownUids?: string): string {
   return encodeMailboxSyncCursor({
     version: 1,
     provider: "imap",
@@ -105,6 +105,7 @@ function cursorAt(lastUid: number): string {
       folder: "INBOX",
       uidValidity,
       lastUid,
+      ...(knownUids === undefined ? {} : { knownUids }),
     },
   });
 }
@@ -280,6 +281,34 @@ describe("getImapMailboxSyncPage", () => {
       pages.flatMap((page) => page.upsertedMessages.map((m) => m.id)),
     ).toEqual([qualifiedId(4), qualifiedId(5), qualifiedId(6), qualifiedId(7)]);
     expect(knownUidsOf(pages[1].cursor)).toBe("1-2,4-7");
+  });
+
+  it("tombstones a UID expunged after an abandoned delta run", async () => {
+    mailboxUids = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    const firstPage = await getImapMailboxSyncPage({
+      ...baseInput,
+      cursor: cursorAt(5, "1-5"),
+      limit: 2,
+    });
+
+    expect(firstPage.hasMore).toBe(true);
+    expect(firstPage.upsertedMessages.map((m) => m.id)).toEqual([
+      qualifiedId(6),
+      qualifiedId(7),
+    ]);
+    // The run is abandoned here, but its page UIDs already reached the local
+    // mailbox, so the cursor must carry them into the next run.
+    expect(knownUidsOf(firstPage.cursor)).toBe("1-7");
+
+    mailboxUids = [1, 2, 3, 4, 5, 7, 8, 9];
+
+    const next = await getImapMailboxSyncPage({
+      ...baseInput,
+      cursor: firstPage.cursor,
+      limit: 10,
+    });
+
+    expect(next.deletedMessageIds).toEqual([qualifiedId(6)]);
   });
 
   it("rejects cursors from another account or folder", async () => {

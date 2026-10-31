@@ -169,8 +169,12 @@ async function getImapDeltaPage(
   );
   const hasMore = newUids.length > pageUids.length;
   // Deletions cost a full `UID SEARCH ALL`, so only the last page of a run
-  // pays for it; earlier pages carry the cursor's range-set forward unchanged.
+  // pays for it; earlier pages carry the cursor's range-set forward plus the
+  // UIDs they just delivered, so an abandoned run can still tombstone them.
   const diff = hasMore ? null : await diffDeletedUids(client, options);
+  const knownUids = diff
+    ? diff.knownUids
+    : addUidsToRangeSet(options.knownUids, pageUids);
 
   return {
     cursor: encodeImapCursor(
@@ -178,7 +182,7 @@ async function getImapDeltaPage(
       options.folder,
       options.uidValidity,
       maxUid,
-      diff ? diff.knownUids : options.knownUids,
+      knownUids,
     ),
     deletedMessageIds: diff ? diff.deletedMessageIds : [],
     hasMore,
@@ -318,6 +322,18 @@ function formatUidRanges(uids: number[]): string {
   }
 
   return ranges.join(",");
+}
+
+// Union the cursor's range-set with UIDs a page just delivered. An undefined
+// range-set stays undefined so a pre-knownUids cursor keeps bootstrapping.
+function addUidsToRangeSet(
+  ranges: string | undefined,
+  uids: number[],
+): string | undefined {
+  if (ranges === undefined) return;
+  const known = parseUidRanges(ranges);
+  for (const uid of uids) known.add(uid);
+  return formatUidRanges([...known]);
 }
 
 function parseUidRanges(ranges: string): Set<number> {
