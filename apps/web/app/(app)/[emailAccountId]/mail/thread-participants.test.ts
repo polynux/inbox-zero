@@ -71,6 +71,40 @@ describe("getThreadParticipantNames", () => {
     ).toEqual(["Jordan", "Taylor"]);
   });
 
+  it("names the recipients of a sent-only thread from another own address", () => {
+    expect(
+      getThreadParticipantNames(
+        [
+          message({
+            from: "Association <alias@example.com>",
+            to: "Jordan <jordan@example.com>",
+            labelIds: ["SENT"],
+          }),
+        ],
+        "owner@example.com",
+      ),
+    ).toEqual(["Jordan"]);
+  });
+
+  it("still names the sender of a mixed thread that includes a sent reply", () => {
+    expect(
+      getThreadParticipantNames(
+        [
+          message({
+            from: "Bah <bah@example.com>",
+            to: "owner@example.com",
+          }),
+          message({
+            from: "owner@example.com",
+            to: "Bah <bah@example.com>",
+            labelIds: ["SENT"],
+          }),
+        ],
+        "owner@example.com",
+      ),
+    ).toEqual(["Bah", "me"]);
+  });
+
   it("keeps recipient names for a draft-only thread", () => {
     expect(
       getThreadParticipantNames(

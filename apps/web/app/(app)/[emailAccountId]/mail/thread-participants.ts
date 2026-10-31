@@ -25,9 +25,21 @@ export function getThreadParticipantNames(
     addParticipant(senders, message.headers.from, normalizedUserEmail);
   }
 
+  // A sent-only thread names its recipients however the From reads: the
+  // sender is one of the account's own addresses (aliases, plus-addressing,
+  // a renamed mailbox), which never equals the login email exactly.
+  const hasOnlySentMessages =
+    nonDraftMessages.length > 0 &&
+    nonDraftMessages.every((message) =>
+      message.labelIds?.includes(GmailLabel.SENT),
+    );
   const hasOnlyAccountOwnerAsSender =
     senders.size === 1 && senders.has(normalizedUserEmail);
-  if (senders.size > 0 && !hasOnlyAccountOwnerAsSender) {
+  if (
+    senders.size > 0 &&
+    !hasOnlyAccountOwnerAsSender &&
+    !hasOnlySentMessages
+  ) {
     return [...senders.values()];
   }
 
