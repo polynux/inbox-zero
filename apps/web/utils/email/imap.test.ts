@@ -1619,6 +1619,35 @@ describe("ImapProvider Proton labels (Labels/* namespace)", () => {
     expect(messages).toHaveLength(2);
   });
 
+  it("getMessagesWithPagination skips a NO folder instead of failing", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [message(1, "2026-01-01"), message(2, "2026-03-01")],
+      },
+      { path: "Archive", messages: [message(10, "2026-02-01")] },
+    ]);
+    const open = fake.client.mailboxOpen;
+    fake.client.mailboxOpen = vi.fn(async (path: string) => {
+      if (path === "Archive")
+        throw Object.assign(new Error("Mailbox Archive gone"), {
+          responseStatus: "NO",
+        });
+      return open(path);
+    });
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).getMessagesWithPagination({
+      inboxOnly: false,
+      query: "invoice",
+    });
+
+    expect(result.messages.map((m) => m.id)).toEqual([
+      qualifiedId("INBOX", 2),
+      qualifiedId("INBOX", 1),
+    ]);
+  });
+
   it("getFolders on Bridge hides All Mail, Starred, Labels/* and containers", async () => {
     const fake = createFakeClient(protonMailboxes());
     connection.client = fake.client;

@@ -1,5 +1,5 @@
 import type { Attachment as MailAttachment } from "nodemailer/lib/mailer";
-import type { ImapFlow } from "imapflow";
+import type { ImapFlow, MailboxObject } from "imapflow";
 import type { ThreadsQuery } from "@/utils/threads/validation";
 import type { LocalMailSyncRequest } from "@/utils/actions/local-mail-sync.validation";
 import type { EmailContact } from "@/utils/email/contact";
@@ -116,7 +116,7 @@ export class ImapProvider implements EmailProvider {
     return this.withConnection(async (client) => {
       const folders = await resolveSearchFolders(client);
       for (const folder of folders) {
-        await client.mailboxOpen(folder, { readOnly: true });
+        if (!(await openFolderSkippingNo(client, folder))) continue;
         const uids = await searchImapMessages(
           client,
           { header: { "Message-ID": rfc822MessageId } },
@@ -199,7 +199,8 @@ export class ImapProvider implements EmailProvider {
       let hasMore = false;
 
       for (const folder of folders) {
-        const mailbox = await client.mailboxOpen(folder, { readOnly: true });
+        const mailbox = await openFolderSkippingNo(client, folder);
+        if (!mailbox) continue;
 
         // For simple listing without query, use sequence numbers (most reliable)
         if (simpleListing) {
@@ -2018,6 +2019,20 @@ function isNoResponse(error: unknown): boolean {
   );
 }
 
+// A container or a concurrently deleted folder answers SELECT with NO.
+// Fan-out loops skip it and keep the rest instead of failing the whole op.
+async function openFolderSkippingNo(
+  client: ImapFlow,
+  folder: string,
+): Promise<MailboxObject | null> {
+  try {
+    return await client.mailboxOpen(folder, { readOnly: true });
+  } catch (error) {
+    if (!isNoResponse(error)) throw error;
+    return null;
+  }
+}
+
 // MIME part ids in `convertImapMessage` come from the bodyStructure tree, so
 // a download for a part absent from that tree is a wrong part id, not an
 // empty file. Empty parts legitimately download as zero bytes.
@@ -2089,14 +2104,7 @@ async function fetchThreadMessages(
   const byUid = new Map<string, ParsedMessage>();
 
   for (const folder of folders) {
-    try {
-      await client.mailboxOpen(folder, { readOnly: true });
-    } catch (error) {
-      // A container or a concurrently deleted folder answers SELECT with
-      // NO; skip it instead of failing the whole op.
-      if (!isNoResponse(error)) throw error;
-      continue;
-    }
+    if (!(await openFolderSkippingNo(client, folder))) continue;
     const candidates = await searchImapMessages(client, {
       or: [
         { header: { "Message-ID": root } },
