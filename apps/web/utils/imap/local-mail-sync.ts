@@ -207,8 +207,7 @@ async function diffDeletedUids(
   const serverUids = await searchImapMessages(client, { all: true });
   const serverUidSet = new Set(serverUids);
   // A cursor written before knownUids existed bootstraps from the server's
-  // current UIDs: reporting a deletion the local mailbox never received is a
-  // harmless no-op, while missing one would leave stale mail behind.
+  // current UID set, so it can never report a false deletion.
   const knownUidSet =
     options.knownUids === undefined
       ? new Set(serverUids)
