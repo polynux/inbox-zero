@@ -167,7 +167,6 @@ describe("withImapConnection", () => {
 
     expect(vi.getTimerCount()).toBe(0);
   });
-
   it("rejects when the connection takes too long", async () => {
     vi.useFakeTimers();
     mockClient({ connect: vi.fn(() => new Promise(() => {})) });
@@ -179,5 +178,48 @@ describe("withImapConnection", () => {
     await vi.advanceTimersByTimeAsync(30_001);
 
     await assertion;
+  });
+
+  it("logs connect failures as connection errors", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockClient({
+      connect: vi.fn(async () => {
+        throw new Error("socket hang up");
+      }),
+    });
+    try {
+      await expect(
+        withImapConnection(baseConfig(), async () => {}),
+      ).rejects.toThrow("socket hang up");
+      expect(
+        errorSpy.mock.calls.some((call) =>
+          String(call[0]).includes("IMAP connection error"),
+        ),
+      ).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  // Live: "Attachment part 999 not found" and "Message … not found" are
+  // expected domain errors, not broken connections.
+  it("does not log callback domain errors as connection errors", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockClient();
+    try {
+      const { SafeError } = await import("@/utils/error");
+      await expect(
+        withImapConnection(baseConfig(), async () => {
+          throw new SafeError("Attachment part 999 not found");
+        }),
+      ).rejects.toThrow("Attachment part 999 not found");
+      expect(
+        errorSpy.mock.calls.some((call) =>
+          String(call[0]).includes("IMAP connection error"),
+        ),
+      ).toBe(false);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

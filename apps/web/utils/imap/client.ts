@@ -56,15 +56,18 @@ export async function withImapConnection<T>(
           CONNECT_TIMEOUT_MS,
         );
       }),
-    ]);
+    ]).catch((error: unknown) => {
+      // Connect/auth/socket failures only: domain errors from the callback
+      // (SafeError, not-found) are expected control flow and propagate
+      // without this error log.
+      logger.error("IMAP connection error", {
+        host: config.imapHost,
+        error,
+      });
+      throw error;
+    });
 
     return await fn(client);
-  } catch (error) {
-    logger.error("IMAP connection error", {
-      host: config.imapHost,
-      error,
-    });
-    throw error;
   } finally {
     clearTimeout(connectTimer);
     try {
