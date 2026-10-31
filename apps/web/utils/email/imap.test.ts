@@ -199,6 +199,11 @@ function createFakeClient(
         listed: mailbox.listed ?? true,
       })),
     ),
+    status: vi.fn(async (path: string) => {
+      const mailbox = mailboxes.find((candidate) => candidate.path === path);
+      if (!mailbox) throw new Error(`mailbox ${path} not found`);
+      return { messages: mailbox.messages.length, unseen: 0 };
+    }),
     mailboxOpen: vi.fn(async (path: string) => {
       const mailbox = mailboxes.find((candidate) => candidate.path === path);
       if (!mailbox) throw new Error(`mailbox ${path} not found`);
@@ -3774,5 +3779,32 @@ describe("ImapProvider scoped provider search", () => {
     expect(
       result.threads.flatMap((t) => t.messages.map((m) => m.id)).sort(),
     ).toEqual([qualifiedId("INBOX", 1), qualifiedId("Trash", 7)].sort());
+  });
+});
+describe("ImapProvider.getFolderCounts", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  it("tags system folders so count consumers can match INBOX", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        specialUse: "\\Inbox",
+        messages: [message(1, "2026-01-01")],
+      },
+      {
+        path: "Work",
+        messages: [message(1, "2026-01-01")],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const counts = await new ImapProvider(config).getFolderCounts();
+
+    expect(counts).toEqual([
+      { id: "INBOX", name: "INBOX", total: 1, unread: 0, systemType: "INBOX" },
+      { id: "Work", name: "Work", total: 1, unread: 0 },
+    ]);
   });
 });

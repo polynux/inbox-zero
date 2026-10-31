@@ -1962,22 +1962,29 @@ ${messageContent}
 
   async getFolderCounts(): Promise<EmailFolderCount[]> {
     return this.withConnection(async (client) => {
-      const labels = await listFolders(client);
+      const folders = await listFoldersAsOutlookFolders(client);
       const counts: EmailFolderCount[] = [];
-      for (const label of labels) {
+      for (const folder of folders) {
         try {
-          const status = await client.status(label.id, {
+          const status = await client.status(folder.id, {
             messages: true,
             unseen: true,
           });
           counts.push({
-            id: label.id,
-            name: label.name,
+            id: folder.id,
+            name: folder.displayName,
             total: status.messages || 0,
             unread: status.unseen || 0,
+            ...(folder.systemType ? { systemType: folder.systemType } : {}),
           });
         } catch {
-          counts.push({ id: label.id, name: label.name, total: 0, unread: 0 });
+          counts.push({
+            id: folder.id,
+            name: folder.displayName,
+            total: 0,
+            unread: 0,
+            ...(folder.systemType ? { systemType: folder.systemType } : {}),
+          });
         }
       }
       return counts;
