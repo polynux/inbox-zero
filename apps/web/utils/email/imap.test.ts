@@ -2021,6 +2021,19 @@ describe("ImapProvider unknown threads", () => {
       ),
     ).resolves.toBeUndefined();
   });
+
+  it("moveThreadToFolder treats a vanished thread as a no-op", async () => {
+    const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).moveThreadToFolder(
+        "no-such-thread",
+        "owner@x.com",
+        "Trash",
+      ),
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe("ImapProvider attachments", () => {
@@ -3820,38 +3833,15 @@ describe("ImapProvider Bridge shared-item placement (self-sent mail)", () => {
     expect(mailboxesOf(fake).Trash.map((m) => m.messageId)).toEqual([root]);
   });
 
-  // Live Bridge behavior differs by op: archiving the INBOX placement of a
-  // self-sent item keeps its Sent placement, while spam/trash relocate the
-  // whole item (Sent placement hides until restored).
-  function relocatingMoves(fake: FakeImapTestClient, keepSentFrom: string[]) {
-    const base = fake.client.messageMove;
-    fake.client.messageMove = vi.fn(async (range: string, to: string) => {
-      const from = fake.opened.at(-1) || "";
-      if (keepSentFrom.includes(from)) {
-        const store = mailboxesOf(fake);
-        const index = store[from]?.findIndex((m) => m.uid === Number(range));
-        if (index === undefined || index < 0) return;
-        const [moved] = store[from].splice(index, 1);
-        store[to]?.push(moved);
-        return;
-      }
-      return (base as (range: string, to: string) => Promise<unknown>)(
-        range,
-        to,
-      );
-    });
-  }
-
-  it("archive keeps the Sent placement of a self-sent item", async () => {
+  it("archive relocates a self-sent item and unarchive restores it", async () => {
     const { fake, threadId, root } = selfSentThread();
-    relocatingMoves(fake, ["INBOX"]);
     const provider = new ImapProvider({ ...config, email: "me@proton.me" });
     connection.client = fake.client;
 
     await provider.archiveThread(threadId, "me@proton.me");
 
     expect(mailboxesOf(fake).INBOX).toEqual([]);
-    expect(mailboxesOf(fake).Sent.map((m) => m.messageId)).toEqual([root]);
+    expect(mailboxesOf(fake).Sent).toEqual([]);
     expect(mailboxesOf(fake).Archive.map((m) => m.messageId)).toEqual([root]);
 
     await provider.unarchiveThread(threadId);

@@ -809,7 +809,8 @@ export class ImapProvider implements EmailProvider {
         const { folder } = parseImapMessageId(msg.id);
         // Gmail semantics: archiving removes the INBOX placement only. A
         // Sent copy is not an inbox copy, so it stays in Sent; on Bridge the
-        // Sent placement of a self-sent item stays too (live-verified).
+        // move relocates the whole shared item (Sent placement hidden until
+        // unarchive, live-verified).
         if (folder !== "INBOX") continue;
         if (folder === archiveFolder) continue;
         try {
@@ -987,9 +988,22 @@ export class ImapProvider implements EmailProvider {
     _ownerEmail: string,
     folderName: string,
   ): Promise<void> {
-    const messages = await this.getThreadMessages(threadId, {
-      forMutation: true,
-    });
+    let messages: ParsedMessage[];
+    try {
+      messages = await this.getThreadMessages(threadId, {
+        forMutation: true,
+      });
+    } catch (error) {
+      // Same no-op-on-missing rule as trashThread: a second move finds
+      // nothing to move, so it succeeds instead of throwing.
+      if (error instanceof ImapThreadNotFoundError) {
+        this.logger.warn("IMAP moveThreadToFolder on missing thread", {
+          threadId,
+        });
+        return;
+      }
+      throw error;
+    }
     return this.withConnection(async (client) => {
       const onBridge = await isProtonBridgeLayout(client);
       if (onBridge && isFallbackViewFolder(folderName))
