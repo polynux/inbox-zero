@@ -8,6 +8,7 @@ type Credential = {
   pollFailureUid: number | null;
   pollFailureCount: number;
   pollLockedUntil: Date | null;
+  lastPolledAt: Date | null;
 };
 
 const { state, prismaFake } = vi.hoisted(() => {
@@ -46,8 +47,8 @@ const { state, prismaFake } = vi.hoisted(() => {
           lastSeenUid?: { lt: number };
           pollLockedUntil?: Date;
           OR?: unknown[];
+          account?: unknown;
         };
-        data: Partial<Credential>;
       }) => {
         const credential = state.credential!;
         // Claim: either no lock or an expired one.
@@ -80,6 +81,12 @@ const { state, prismaFake } = vi.hoisted(() => {
           Object.assign(credential, data);
           return { count: 1 };
         }
+        // Validation-gate liveness stamp: the only poll write that names no
+        // cursor or lock guard.
+        if (where.account) {
+          Object.assign(credential, data);
+          return { count: 1 };
+        }
         throw new Error("unexpected updateMany");
       },
     },
@@ -88,7 +95,6 @@ const { state, prismaFake } = vi.hoisted(() => {
 
   return { state, prismaFake };
 });
-
 const client = {
   mailboxOpen: async () =>
     state.mailboxOverride ?? {
@@ -213,6 +219,7 @@ function setCursor(
     pollFailureUid: null,
     pollFailureCount: 0,
     pollLockedUntil: null,
+    lastPolledAt: null,
   };
 }
 
@@ -473,6 +480,7 @@ describe("pollImapAccount", () => {
     });
     expect(state.processed).toEqual([]);
     expect(state.credential?.lastSeenUid).toBe(3);
+    expect(state.credential?.lastPolledAt).toBeInstanceOf(Date);
   });
 
   it("baselines a null cursor: first poll reports 0 new", async () => {

@@ -68,9 +68,14 @@ export async function pollImapAccount(
     );
     const validation = await validateWebhookAccount(emailAccount, log);
     if (!validation.success) {
+      // The account is gated out of automation, but the poll still ran: stamp
+      // liveness so the user can see polling is alive.
+      await prisma.imapCredential.updateMany({
+        where: { account: { emailAccount: { id: emailAccountId } } },
+        data: { lastPolledAt: new Date() },
+      });
       return { emailAccountId, newMessages: 0 };
     }
-
     const result = await withImapConnection(credentials, async (client) => {
       const mailbox = await client.mailboxOpen("INBOX", { readOnly: true });
 
