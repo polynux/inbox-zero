@@ -98,8 +98,9 @@ describe("parseSearchQuery", () => {
 
   it("mixes quoted values with unquoted terms in one object", () => {
     expect(
-      parseSearchQuery('from:alice@example.com subject:"weekly update" important')
-        .criteria,
+      parseSearchQuery(
+        'from:alice@example.com subject:"weekly update" important',
+      ).criteria,
     ).toEqual({
       from: "alice@example.com",
       subject: "weekly update",

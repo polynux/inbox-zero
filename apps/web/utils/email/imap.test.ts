@@ -262,8 +262,7 @@ function createFakeClient(
         if (criteria.or && !criteria.not) {
           const ors = criteria.or as Array<{ header: Record<string, string> }>;
           const headersOnly = ors.every(
-            (part) =>
-              Object.keys(part).length === 1 && "header" in part,
+            (part) => Object.keys(part).length === 1 && "header" in part,
           );
           if (headersOnly) {
             const needles = ors.map((o) =>
@@ -806,9 +805,7 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       query: "from:alice@x invoice",
     });
 
-    expect(result.messages.map((m) => m.id)).toEqual([
-      qualifiedId("INBOX", 1),
-    ]);
+    expect(result.messages.map((m) => m.id)).toEqual([qualifiedId("INBOX", 1)]);
     const sent = (
       fake.client.search as unknown as { mock: { calls: unknown[][] } }
     ).mock.calls.map((call) => call[0] as Record<string, unknown>);
@@ -836,9 +833,7 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       query: "invoice receipt",
     });
 
-    expect(result.messages.map((m) => m.id)).toEqual([
-      qualifiedId("INBOX", 1),
-    ]);
+    expect(result.messages.map((m) => m.id)).toEqual([qualifiedId("INBOX", 1)]);
   });
 
   it("filters has:attachment client-side on populated attachment metadata", async () => {
@@ -862,9 +857,7 @@ describe("ImapProvider.getMessagesWithPagination inboxOnly", () => {
       query: "has:attachment invoice",
     });
 
-    expect(result.messages.map((m) => m.id)).toEqual([
-      qualifiedId("INBOX", 1),
-    ]);
+    expect(result.messages.map((m) => m.id)).toEqual([qualifiedId("INBOX", 1)]);
   });
   // Live: Bridge UID order is append order, not date order, so a sequence
   // window repeated pages 2-4 and never returned the oldest UIDs.
@@ -1333,11 +1326,21 @@ describe("ImapProvider.getMessagesWithAttachments pagination", () => {
       {
         path: "INBOX",
         messages: [
-          message(1, "2026-05-01", undefined, undefined, { hasAttachment: true }),
-          message(2, "2026-01-01", undefined, undefined, { hasAttachment: true }),
-          message(3, "2026-04-01", undefined, undefined, { hasAttachment: true }),
-          message(4, "2026-02-01", undefined, undefined, { hasAttachment: true }),
-          message(5, "2026-03-01", undefined, undefined, { hasAttachment: true }),
+          message(1, "2026-05-01", undefined, undefined, {
+            hasAttachment: true,
+          }),
+          message(2, "2026-01-01", undefined, undefined, {
+            hasAttachment: true,
+          }),
+          message(3, "2026-04-01", undefined, undefined, {
+            hasAttachment: true,
+          }),
+          message(4, "2026-02-01", undefined, undefined, {
+            hasAttachment: true,
+          }),
+          message(5, "2026-03-01", undefined, undefined, {
+            hasAttachment: true,
+          }),
         ],
       },
     ]);
@@ -1369,8 +1372,12 @@ describe("ImapProvider.getMessagesWithAttachments pagination", () => {
       {
         path: "INBOX",
         messages: [
-          message(1, "2026-01-01", undefined, undefined, { hasAttachment: true }),
-          message(2, "2026-02-01", undefined, undefined, { hasAttachment: true }),
+          message(1, "2026-01-01", undefined, undefined, {
+            hasAttachment: true,
+          }),
+          message(2, "2026-02-01", undefined, undefined, {
+            hasAttachment: true,
+          }),
         ],
       },
     ]);

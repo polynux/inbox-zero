@@ -429,7 +429,7 @@ export function decodedBodyPartSize(
   encodedSize: number,
   encoding: string | undefined,
 ): number {
-  if (!encoding || encoding.toLowerCase() !== "base64") return encodedSize;
+  if (encoding?.toLowerCase() !== "base64") return encodedSize;
   const decoded = Math.floor((encodedSize * 3) / 4);
   // A padded base64 tail decodes short; the worst case is two pad chars.
   // CRLF line breaks (RFC 2045: 76-char lines) inflate by ~2 per 76.

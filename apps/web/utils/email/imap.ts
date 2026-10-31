@@ -29,12 +29,10 @@ import { UnsupportedImapOperationError } from "@/utils/imap/types";
 import { DraftNotFoundError, SafeError } from "@/utils/error";
 import { withImapConnection } from "@/utils/imap/client";
 import {
-  convertImapMessage,
   fetchInternalDatesByUids,
   fetchMessageByUid,
   fetchMessagesByUids,
   fetchRecentMessages,
-  parseReferencesHeader,
   parseSearchQuery,
   searchImapMessages,
 } from "@/utils/imap/message";
@@ -1741,7 +1739,9 @@ ${messageContent}
         if (folder !== trashFolder) continue;
         const from = extractEmailAddress(msg.headers.from).toLowerCase();
         const target =
-          sentFolder && from !== "" && from === ownAddress ? sentFolder : "INBOX";
+          sentFolder && from !== "" && from === ownAddress
+            ? sentFolder
+            : "INBOX";
         await client.mailboxOpen(folder);
         await moveMessageToFolder(client, uid, target);
       }
