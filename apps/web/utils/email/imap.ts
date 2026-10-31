@@ -20,7 +20,7 @@ import type {
   MailboxSyncPage,
   SentMessagePage,
 } from "@/utils/email/types";
-import type { LocalMailSyncResponse } from "@/utils/email/local-mail-sync-types";
+import type { ParsedMessage } from "@/utils/types";
 import type { OutlookFolder } from "@/utils/outlook/folders";
 import type { InboxZeroLabel } from "@/utils/label";
 import type { Logger } from "@/utils/logger";
@@ -705,7 +705,9 @@ export class ImapProvider implements EmailProvider {
       // No label namespace: "labeling" means moving to a folder.
       if (folder === options.labelId) return { actualLabelId: options.labelId };
       await client.mailboxOpen(folder);
-      await moveMessageToFolder(client, uid, options.labelId);
+      await moveMessageToFolder(client, uid, options.labelId, {
+        sourceFolder: folder,
+      });
       return { actualLabelId: options.labelId };
     });
   }
@@ -761,15 +763,20 @@ export class ImapProvider implements EmailProvider {
 
     return this.withConnection(async (client) => {
       const archiveFolder = await findArchiveFolder(client);
-      for (const msg of messages) {
-        const { folder, uid } = parseImapMessageId(msg.id);
+      const targets = (await isProtonBridgeLayout(client))
+        ? selectOnePlacementPerItem(messages)
+        : messages;
+      for (const msg of targets) {
+        const { folder } = parseImapMessageId(msg.id);
         // Gmail semantics: archiving removes the INBOX placement only. A
-        // Sent copy is not an inbox copy, so it stays in Sent.
+        // Sent copy is not an inbox copy, so it stays in Sent. On Bridge the
+        // INBOX placement of a self-sent item is the one selected placement,
+        // and the shared item's Sent placement goes with it (Proton keeps one
+        // location per item); unarchive restores the INBOX placement.
         if (folder !== "INBOX") continue;
         if (folder === archiveFolder) continue;
-        await client.mailboxOpen(folder);
         try {
-          await moveMessageToFolder(client, uid, archiveFolder);
+          await movePlacementToFolder(client, msg, archiveFolder);
         } catch (error) {
           if (isAlreadyInTargetError(error)) continue;
           this.logger.warn("IMAP archiveThread move failed", {
@@ -800,7 +807,10 @@ export class ImapProvider implements EmailProvider {
           onBridge &&
           archiveFolder &&
           (_labelId === "Labels" || _labelId.startsWith("Labels/"));
-        for (const msg of messages) {
+        const targets = onBridge
+          ? selectOnePlacementPerItem(messages)
+          : messages;
+        for (const msg of targets) {
           const { folder, uid } = parseImapMessageId(msg.id);
           if (isLabelMove) {
             // A Proton label is a view, not a location: COPY into it, then
@@ -809,14 +819,12 @@ export class ImapProvider implements EmailProvider {
               await client.mailboxOpen(folder);
               await client.messageCopy(String(uid), _labelId, { uid: true });
             }
-            if (folder === archiveFolder) continue;
-            await client.mailboxOpen(folder);
-            await moveMessageToFolder(client, uid, archiveFolder);
+            if (folder === archiveFolder || !archiveFolder) continue;
+            await movePlacementToFolder(client, msg, archiveFolder);
             continue;
           }
           if (folder === _labelId) continue;
-          await client.mailboxOpen(folder);
-          await moveMessageToFolder(client, uid, _labelId);
+          await movePlacementToFolder(client, msg, _labelId);
         }
       });
     }
@@ -826,14 +834,17 @@ export class ImapProvider implements EmailProvider {
   async archiveMessage(messageId: string): Promise<void> {
     const { folder, uid } = parseImapMessageId(messageId);
     return this.withConnection(async (client) => {
-      if ((await isProtonBridgeLayout(client)) && isFallbackViewFolder(folder))
+      const onBridge = await isProtonBridgeLayout(client);
+      if (onBridge && isFallbackViewFolder(folder))
         throw new SafeError(
           `Cannot archive a message in a Proton view mailbox (${folder})`,
         );
       const archiveFolder = await findArchiveFolder(client);
       if (folder === archiveFolder) return;
       await client.mailboxOpen(folder);
-      await moveMessageToFolder(client, uid, archiveFolder);
+      const live = await fetchMessageByUid(client, uid);
+      if (!live) return;
+      await movePlacementToFolder(client, live, archiveFolder);
     });
   }
 
@@ -859,12 +870,14 @@ export class ImapProvider implements EmailProvider {
     return this.withConnection(async (client) => {
       const trashFolder = await findTrashFolder(client);
       if (!trashFolder) return;
-      for (const msg of messages) {
-        const { folder, uid } = parseImapMessageId(msg.id);
+      const targets = (await isProtonBridgeLayout(client))
+        ? selectOnePlacementPerItem(messages)
+        : messages;
+      for (const msg of targets) {
+        const { folder } = parseImapMessageId(msg.id);
         if (folder === trashFolder) continue;
-        await client.mailboxOpen(folder);
         try {
-          await moveMessageToFolder(client, uid, trashFolder);
+          await movePlacementToFolder(client, msg, trashFolder);
         } catch (error) {
           if (isAlreadyInTargetError(error)) continue;
           this.logger.warn("IMAP trashThread move failed", {
@@ -917,12 +930,14 @@ export class ImapProvider implements EmailProvider {
       const skipped = new Set(
         [sentFolder, draftsFolder].filter((folder) => folder !== null),
       );
+      const targets = (await isProtonBridgeLayout(client))
+        ? selectOnePlacementPerItem(messages)
+        : messages;
 
-      for (const msg of messages) {
-        const { folder, uid } = parseImapMessageId(msg.id);
+      for (const msg of targets) {
+        const { folder } = parseImapMessageId(msg.id);
         if (folder === targetFolder || skipped.has(folder)) continue;
-        await client.mailboxOpen(folder);
-        await moveMessageToFolder(client, uid, targetFolder);
+        await movePlacementToFolder(client, msg, targetFolder);
       }
     });
   }
@@ -939,18 +954,16 @@ export class ImapProvider implements EmailProvider {
       forMutation: true,
     });
     return this.withConnection(async (client) => {
-      if (
-        (await isProtonBridgeLayout(client)) &&
-        isFallbackViewFolder(folderName)
-      )
+      const onBridge = await isProtonBridgeLayout(client);
+      if (onBridge && isFallbackViewFolder(folderName))
         throw new SafeError(
           `Cannot move a thread into a Proton view mailbox (${folderName})`,
         );
-      for (const msg of messages) {
-        const { folder, uid } = parseImapMessageId(msg.id);
+      const targets = onBridge ? selectOnePlacementPerItem(messages) : messages;
+      for (const msg of targets) {
+        const { folder } = parseImapMessageId(msg.id);
         if (folder === folderName) continue;
-        await client.mailboxOpen(folder);
-        await moveMessageToFolder(client, uid, folderName);
+        await movePlacementToFolder(client, msg, folderName);
       }
     });
   }
@@ -975,7 +988,9 @@ export class ImapProvider implements EmailProvider {
           email,
         );
         for (const uid of uids) {
-          await moveMessageToFolder(client, uid, archiveFolder);
+          await moveMessageToFolder(client, uid, archiveFolder, {
+            sourceFolder: "INBOX",
+          });
         }
       }
     });
@@ -1000,7 +1015,9 @@ export class ImapProvider implements EmailProvider {
           email,
         );
         for (const uid of uids) {
-          await moveMessageToFolder(client, uid, trashFolder);
+          await moveMessageToFolder(client, uid, trashFolder, {
+            sourceFolder: "INBOX",
+          });
         }
       }
     });
@@ -1583,45 +1600,31 @@ ${messageContent}
     return this.withConnection(async (client) => {
       const archiveFolder = await findArchiveFolder(client);
       const onBridge = await isProtonBridgeLayout(client);
-      for (const messageId of new Set(messageIds)) {
-        const { folder, uid } = parseImapMessageId(messageId);
-        if (onBridge && isFallbackViewFolder(folder)) {
+      await moveMessageSnapshots(client, messageIds, archiveFolder, {
+        onBridge,
+        logSkippedView: (id) =>
           this.logger.warn("IMAP archiveMessages skipping Bridge view id", {
-            messageId,
-          });
-          continue;
-        }
-        if (folder === archiveFolder) continue;
-        await client.mailboxOpen(folder);
-        try {
-          await moveMessageToFolder(client, uid, archiveFolder);
-        } catch (error) {
-          if (isAlreadyInTargetError(error)) continue;
+            messageId: id,
+          }),
+        onError: (id, error) =>
           this.logger.warn("IMAP archiveMessages move failed", {
-            messageId,
+            messageId: id,
             error,
-          });
-          throw error;
-        }
-      }
+          }),
+      });
     });
   }
 
   async unarchiveMessages(messageIds: string[]): Promise<void> {
     return this.withConnection(async (client) => {
       const onBridge = await isProtonBridgeLayout(client);
-      for (const messageId of new Set(messageIds)) {
-        const { folder, uid } = parseImapMessageId(messageId);
-        if (onBridge && isFallbackViewFolder(folder)) {
+      await moveMessageSnapshots(client, messageIds, "INBOX", {
+        onBridge,
+        logSkippedView: (id) =>
           this.logger.warn("IMAP unarchiveMessages skipping Bridge view id", {
-            messageId,
-          });
-          continue;
-        }
-        if (folder === "INBOX") continue;
-        await client.mailboxOpen(folder);
-        await moveMessageToFolder(client, uid, "INBOX");
-      }
+            messageId: id,
+          }),
+      });
     });
   }
 
@@ -1630,44 +1633,31 @@ ${messageContent}
       const trashFolder = await findTrashFolder(client);
       if (!trashFolder) return;
       const onBridge = await isProtonBridgeLayout(client);
-      for (const messageId of new Set(messageIds)) {
-        const { folder, uid } = parseImapMessageId(messageId);
-        if (onBridge && isFallbackViewFolder(folder)) {
+      await moveMessageSnapshots(client, messageIds, trashFolder, {
+        onBridge,
+        logSkippedView: (id) =>
           this.logger.warn("IMAP trashMessages skipping Bridge view id", {
-            messageId,
-          });
-          continue;
-        }
-        if (folder === trashFolder) continue;
-        await client.mailboxOpen(folder);
-        try {
-          await moveMessageToFolder(client, uid, trashFolder);
-        } catch (error) {
+            messageId: id,
+          }),
+        onError: (id, error) =>
           this.logger.warn("IMAP trashMessages move failed", {
-            messageId,
+            messageId: id,
             error,
-          });
-          throw error;
-        }
-      }
+          }),
+      });
     });
   }
 
   async untrashMessages(messageIds: string[]): Promise<void> {
     return this.withConnection(async (client) => {
       const onBridge = await isProtonBridgeLayout(client);
-      for (const messageId of new Set(messageIds)) {
-        const { folder, uid } = parseImapMessageId(messageId);
-        if (onBridge && isFallbackViewFolder(folder)) {
+      await moveMessageSnapshots(client, messageIds, "INBOX", {
+        onBridge,
+        logSkippedView: (id) =>
           this.logger.warn("IMAP untrashMessages skipping Bridge view id", {
-            messageId,
-          });
-          continue;
-        }
-        if (folder === "INBOX") continue;
-        await client.mailboxOpen(folder);
-        await moveMessageToFolder(client, uid, "INBOX");
-      }
+            messageId: id,
+          }),
+      });
     });
   }
 
@@ -1749,12 +1739,14 @@ ${messageContent}
     return this.withConnection(async (client) => {
       const junkFolder = await findJunkFolder(client);
       const spamFolder = junkFolder || "Junk";
-      for (const msg of messages) {
-        const { folder, uid } = parseImapMessageId(msg.id);
+      const targets = (await isProtonBridgeLayout(client))
+        ? selectOnePlacementPerItem(messages)
+        : messages;
+      for (const msg of targets) {
+        const { folder } = parseImapMessageId(msg.id);
         // Not-spam returns spam mail to INBOX; copies elsewhere keep theirs.
         if (folder !== spamFolder) continue;
-        await client.mailboxOpen(folder);
-        await moveMessageToFolder(client, uid, "INBOX");
+        await movePlacementToFolder(client, msg, "INBOX");
       }
     });
   }
@@ -1765,13 +1757,15 @@ ${messageContent}
     });
     return this.withConnection(async (client) => {
       const archiveFolder = await findArchiveFolder(client);
-      for (const msg of messages) {
-        const { folder, uid } = parseImapMessageId(msg.id);
+      const targets = (await isProtonBridgeLayout(client))
+        ? selectOnePlacementPerItem(messages)
+        : messages;
+      for (const msg of targets) {
+        const { folder } = parseImapMessageId(msg.id);
         // Unarchiving returns archived mail to INBOX; anything elsewhere
         // (notably Sent) keeps its placement.
         if (folder !== archiveFolder) continue;
-        await client.mailboxOpen(folder);
-        await moveMessageToFolder(client, uid, "INBOX");
+        await movePlacementToFolder(client, msg, "INBOX");
       }
     });
   }
@@ -1788,8 +1782,11 @@ ${messageContent}
       if (!trashFolder) return;
       const sentFolder = await findSentFolder(client);
       const ownAddress = this.config.email.toLowerCase();
-      for (const msg of messages) {
-        const { folder, uid } = parseImapMessageId(msg.id);
+      const targets = (await isProtonBridgeLayout(client))
+        ? selectOnePlacementPerItem(messages)
+        : messages;
+      for (const msg of targets) {
+        const { folder } = parseImapMessageId(msg.id);
         // Only trashed copies move back. A copy the account sent restores to
         // Sent; received mail restores to INBOX.
         if (folder !== trashFolder) continue;
@@ -1798,8 +1795,7 @@ ${messageContent}
           sentFolder && from !== "" && from === ownAddress
             ? sentFolder
             : "INBOX";
-        await client.mailboxOpen(folder);
-        await moveMessageToFolder(client, uid, target);
+        await movePlacementToFolder(client, msg, target);
       }
     });
   }
@@ -1820,7 +1816,9 @@ ${messageContent}
         fromEmail,
       );
       for (const uid of uids) {
-        await moveMessageToFolder(client, uid, archiveFolder);
+        await moveMessageToFolder(client, uid, archiveFolder, {
+          sourceFolder: "INBOX",
+        });
       }
       return uids.length;
     });
@@ -1834,14 +1832,13 @@ ${messageContent}
     const failedThreadIds: string[] = [];
     await this.withConnection(async (client) => {
       const archiveFolder = await findArchiveFolder(client);
+      const onBridge = await isProtonBridgeLayout(client);
       for (const thread of threads) {
         try {
-          for (const messageId of thread.messageIds) {
-            const { folder, uid } = parseImapMessageId(messageId);
-            if (folder === archiveFolder) continue;
-            await client.mailboxOpen(folder);
-            await moveMessageToFolder(client, uid, archiveFolder);
-          }
+          await moveMessageSnapshots(client, thread.messageIds, archiveFolder, {
+            onBridge,
+            logSkippedView: () => {},
+          });
           succeededThreadIds.push(thread.threadId);
         } catch {
           failedThreadIds.push(thread.threadId);
@@ -2237,6 +2234,126 @@ function groupMessageIdsByFolder(
     else grouped.set(parsed.folder, [parsed]);
   }
   return grouped;
+}
+
+// Bridge exposes one Proton item in several real folders at once (a
+// self-sent mail is ONE item with INBOX and Sent placements, each with its
+// own UID but the same Message-ID). Moving one placement relocates the item,
+// so a thread op must act on one placement per item: moving every snapshot
+// placement re-moves an already-relocated item, and Bridge permanently
+// deletes a message moved to Trash while already in Trash.
+function normalizeItemMessageId(value: string | undefined): string | null {
+  if (!value) return null;
+  const normalized = value.replace(/^<|>$/g, "").trim().toLowerCase();
+  return normalized ? normalized : null;
+}
+
+// One placement per Proton item: prefer the received (INBOX) copy, else keep
+// the snapshot's first placement for determinism; members without a
+// Message-ID are distinct items (cannot be grouped) and always stay.
+function selectOnePlacementPerItem(messages: ParsedMessage[]): ParsedMessage[] {
+  const byItem = new Map<string, ParsedMessage>();
+  const headerless: ParsedMessage[] = [];
+  for (const message of messages) {
+    const itemId = normalizeItemMessageId(message.headers["message-id"]);
+    if (!itemId) {
+      headerless.push(message);
+      continue;
+    }
+    const existing = byItem.get(itemId);
+    if (!existing) {
+      byItem.set(itemId, message);
+      continue;
+    }
+    const prefersInbox =
+      parseImapMessageId(message.id).folder === "INBOX" &&
+      parseImapMessageId(existing.id).folder !== "INBOX";
+    if (prefersInbox) byItem.set(itemId, message);
+  }
+  const selected = [...byItem.values(), ...headerless];
+  const order = new Map(messages.map((message, index) => [message, index]));
+  selected.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+  return selected;
+}
+
+// Move one placement to the target, verifying the member is still where the
+// snapshot said and still outside the target: an earlier move in the same op
+// may have relocated the shared item (Bridge) or a concurrent client may have
+// moved it. A same-folder or already-relocated member is a no-op success —
+// never issue a MOVE into the folder the item already lives in.
+async function movePlacementToFolder(
+  client: ImapFlow,
+  message: ParsedMessage,
+  targetFolder: string,
+): Promise<void> {
+  const { folder, uid } = parseImapMessageId(message.id);
+  await client.mailboxOpen(folder);
+  const stillThere = await searchImapMessages(client, { uid: `${uid}` });
+  if (stillThere.length === 0) return;
+  const itemId = normalizeItemMessageId(message.headers["message-id"]);
+  if (itemId && folder !== targetFolder) {
+    await client.mailboxOpen(targetFolder);
+    const inTarget = await searchImapMessages(client, {
+      header: { "Message-ID": itemId },
+    });
+    if (inTarget.length > 0) {
+      const exact = await fetchMessagesByUids(client, inTarget);
+      if (
+        exact.some(
+          (hit) => normalizeItemMessageId(hit.headers["message-id"]) === itemId,
+        )
+      )
+        return;
+    }
+    await client.mailboxOpen(folder);
+  }
+  await moveMessageToFolder(client, uid, targetFolder, {
+    sourceFolder: folder,
+  });
+}
+
+// Move id-named members one item at a time: resolve each id to its live
+// copy, skip items already handled in this op, and re-check the live folder
+// before every move. `onError` logs a per-member failure before it rethrows;
+// restores pass a per-message target instead of a fixed folder.
+async function moveMessageSnapshots(
+  client: ImapFlow,
+  messageIds: string[],
+  resolveTarget: string | ((message: ParsedMessage) => string),
+  options: {
+    onBridge: boolean;
+    logSkippedView: (messageId: string) => void;
+    onError?: (messageId: string, error: unknown) => void;
+  },
+): Promise<void> {
+  const handledItems = new Set<string>();
+  for (const messageId of new Set(messageIds)) {
+    const { folder, uid } = parseImapMessageId(messageId);
+    if (options.onBridge && isFallbackViewFolder(folder)) {
+      options.logSkippedView(messageId);
+      continue;
+    }
+    await client.mailboxOpen(folder);
+    const live = await fetchMessageByUid(client, uid);
+    if (!live) continue;
+    const target =
+      typeof resolveTarget === "string" ? resolveTarget : resolveTarget(live);
+    if (folder === target) continue;
+    const itemId = options.onBridge
+      ? normalizeItemMessageId(live.headers["message-id"])
+      : null;
+    if (itemId) {
+      if (handledItems.has(itemId)) continue;
+      handledItems.add(itemId);
+    }
+    try {
+      await movePlacementToFolder(client, live, target);
+    } catch (error) {
+      if (isAlreadyInTargetError(error)) continue;
+      options.onError?.(messageId, error);
+      throw error;
+    }
+  }
 }
 
 function isNoResponse(error: unknown): boolean {

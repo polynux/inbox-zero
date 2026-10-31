@@ -97,15 +97,20 @@ export async function getOrCreateFolder(
 }
 
 /**
- * Move a message to a different folder. imapflow resolves a missing UID to
- * an empty range and reports success, so this returns nothing; callers that
- * need certainty must verify presence first.
+ * Move a message to a different folder. Moving into the folder the message
+ * already lives in is never a useful op — and on Proton Bridge a MOVE into
+ * Trash of a Trash copy permanently deletes the item — so same-folder moves
+ * return without issuing the command. imapflow resolves a missing UID to an
+ * empty range and reports success, so this returns nothing; callers that need
+ * certainty must verify presence first.
  */
 export async function moveMessageToFolder(
   client: ImapFlow,
   uid: number,
   targetFolder: string,
+  options?: { sourceFolder?: string },
 ): Promise<void> {
+  if (options?.sourceFolder === targetFolder) return;
   await client.messageMove(String(uid), targetFolder, { uid: true });
 }
 

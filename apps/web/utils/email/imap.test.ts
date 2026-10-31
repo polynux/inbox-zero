@@ -89,10 +89,18 @@ function mailboxesOf(fake: { client: unknown }): Record<string, FakeMessage[]> {
   return list;
 }
 
+type FakeImapTestClient = {
+  client: ImapFlow;
+  opened: string[];
+  fetchedUids: number[];
+  fetchQueries: Array<Record<string, unknown> | undefined>;
+  appended: Array<{ path: string; flags: string[] }>;
+};
+
 function createFakeClient(
   mailboxes: FakeMailbox[],
   options?: { uidPlus?: boolean },
-) {
+): FakeImapTestClient {
   const mailboxSupportsUidPlus = options?.uidPlus ?? true;
   const appended: Array<{ path: string; flags: string[] }> = [];
   const opened: string[] = [];
@@ -3374,5 +3382,228 @@ describe("ImapProvider attachment edge cases", () => {
     await expect(
       new ImapProvider(config).getAttachment(qualifiedId("INBOX", 1), "2"),
     ).resolves.toEqual({ data: "", size: 0 });
+  });
+});
+describe("ImapProvider Bridge shared-item placement (self-sent mail)", () => {
+  beforeEach(() => {
+    connection.client = null;
+  });
+
+  function bridgeLayout(extra: FakeMailbox[]) {
+    return [
+      ...extra,
+      { path: "Drafts", specialUse: "\\Drafts", messages: [] },
+      { path: "Archive", specialUse: "\\Archive", messages: [] },
+      { path: "Spam", specialUse: "\\Junk", messages: [] },
+      { path: "Trash", specialUse: "\\Trash", messages: [] },
+      { path: "All Mail", messages: [] },
+      { path: "Folders", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "Starred", specialUse: "\\Flagged", messages: [] },
+    ];
+  }
+
+  // Bridge models one Proton item with several folder placements: moving any
+  // placement relocates the whole item, and moving a Trash copy into Trash
+  // deletes it permanently (live-verified on Bridge v3.27.1). A UID keeps
+  // naming its item after a move, so a stale placement snapshot still
+  // resolves — that is the data-loss path under test.
+  function sharedItemMoves(fake: FakeImapTestClient, trashPath: string) {
+    const uidToItem = new Map<number, string>();
+    const rememberLive = () => {
+      for (const messages of Object.values(mailboxesOf(fake))) {
+        for (const m of messages) {
+          if (m.messageId) uidToItem.set(m.uid, m.messageId);
+        }
+      }
+    };
+    rememberLive();
+    fake.client.messageMove = vi.fn(async (range: string, to: string) => {
+      const from = fake.opened.at(-1) || "";
+      const store = mailboxesOf(fake);
+      rememberLive();
+      const itemId =
+        store[from]?.find((m) => m.uid === Number(range))?.messageId ??
+        uidToItem.get(Number(range));
+      if (!itemId) return;
+      const live = Object.values(store).flatMap((messages) =>
+        messages.filter((m) => m.messageId === itemId),
+      );
+      if (live.length === 0) return;
+      const inTarget = Object.entries(store).find(
+        ([path, messages]) =>
+          path === to && messages.some((m) => m.messageId === itemId),
+      );
+      // The item already lives in the target: same-folder MOVE is a no-op
+      // everywhere except Trash, where Bridge deletes it permanently.
+      if (inTarget) {
+        if (to === trashPath) {
+          for (const messages of Object.values(store)) {
+            const index = messages.findIndex((m) => m.messageId === itemId);
+            if (index >= 0) messages.splice(index, 1);
+          }
+        }
+        return;
+      }
+      const moved = store[from]?.find((m) => m.messageId === itemId) ?? live[0];
+      for (const messages of Object.values(store)) {
+        const index = messages.findIndex((m) => m.messageId === itemId);
+        if (index >= 0) messages.splice(index, 1);
+      }
+      store[to]?.push(moved);
+    });
+  }
+
+  function selfSentThread() {
+    const root = "<self-sent@proton.me>";
+    const threadId = buildThreadId(undefined, undefined, root);
+    const fake = createFakeClient(
+      bridgeLayout([
+        {
+          path: "INBOX",
+          messages: [
+            message(2957, "2026-10-31", "me@proton.me", "me@proton.me", {
+              messageId: root,
+            }),
+          ],
+        },
+        {
+          path: "Sent",
+          specialUse: "\\Sent",
+          messages: [
+            message(654, "2026-10-31", "me@proton.me", "me@proton.me", {
+              messageId: root,
+            }),
+          ],
+        },
+      ]),
+    );
+    sharedItemMoves(fake, "Trash");
+    return { fake, threadId, root };
+  }
+
+  it("trashThread moves a self-sent item to Trash once, never deleting it", async () => {
+    const { fake, threadId, root } = selfSentThread();
+    connection.client = fake.client;
+
+    await new ImapProvider({
+      ...config,
+      email: "me@proton.me",
+    }).trashThread(threadId, "me@proton.me", "user");
+
+    expect(mailboxesOf(fake).INBOX).toEqual([]);
+    expect(mailboxesOf(fake).Sent).toEqual([]);
+    expect(mailboxesOf(fake).Trash.map((m) => m.messageId)).toEqual([root]);
+  });
+
+  it("trashThread on a 3-message self-sent thread leaves every item in Trash", async () => {
+    const root = "<self-3@proton.me>";
+    const threadId = buildThreadId(undefined, undefined, root);
+    const fake = createFakeClient(
+      bridgeLayout([
+        {
+          path: "INBOX",
+          messages: [0, 1, 2].map((index) =>
+            message(100 + index, "2026-10-31", "me@proton.me", "me@proton.me", {
+              messageId: index === 0 ? root : `<self-3-r${index}@proton.me>`,
+              ...(index === 0
+                ? {}
+                : {
+                    inReplyTo: root,
+                    references: root,
+                  }),
+            }),
+          ),
+        },
+        {
+          path: "Sent",
+          specialUse: "\\Sent",
+          messages: [0, 1, 2].map((index) =>
+            message(200 + index, "2026-10-31", "me@proton.me", "me@proton.me", {
+              messageId: index === 0 ? root : `<self-3-r${index}@proton.me>`,
+              ...(index === 0
+                ? {}
+                : {
+                    inReplyTo: root,
+                    references: root,
+                  }),
+            }),
+          ),
+        },
+      ]),
+    );
+    sharedItemMoves(fake, "Trash");
+    connection.client = fake.client;
+
+    await new ImapProvider({
+      ...config,
+      email: "me@proton.me",
+    }).trashThread(threadId, "me@proton.me", "user");
+
+    expect(mailboxesOf(fake).INBOX).toEqual([]);
+    expect(mailboxesOf(fake).Sent).toEqual([]);
+    expect(mailboxesOf(fake).Trash).toHaveLength(3);
+  });
+
+  it("untrashThread restores a trashed self-sent item so it resolves again", async () => {
+    const { fake, threadId, root } = selfSentThread();
+    const provider = new ImapProvider({ ...config, email: "me@proton.me" });
+    connection.client = fake.client;
+    await provider.trashThread(threadId, "me@proton.me", "user");
+    expect(mailboxesOf(fake).Trash.map((m) => m.messageId)).toEqual([root]);
+
+    await provider.untrashThread(threadId);
+
+    expect(mailboxesOf(fake).Trash).toEqual([]);
+    const inbox = mailboxesOf(fake).INBOX.map((m) => m.messageId);
+    const sent = mailboxesOf(fake).Sent.map((m) => m.messageId);
+    expect([...inbox, ...sent]).toEqual([root]);
+    const restored = await provider.getThread(threadId);
+    expect(restored.messages).toHaveLength(1);
+  });
+
+  it("trashing an already-trashed item is a no-op success", async () => {
+    const root = "<already-trashed@proton.me>";
+    const fake = createFakeClient(
+      bridgeLayout([
+        { path: "INBOX", messages: [] },
+        { path: "Sent", specialUse: "\\Sent", messages: [] },
+      ]),
+    );
+    mailboxesOf(fake).Trash.push(
+      message(302, "2026-10-31", "me@proton.me", "me@proton.me", {
+        messageId: root,
+      }),
+    );
+    sharedItemMoves(fake, "Trash");
+    connection.client = fake.client;
+    const provider = new ImapProvider({ ...config, email: "me@proton.me" });
+
+    await provider.trashMessages([qualifiedId("Trash", 302)]);
+
+    expect(mailboxesOf(fake).Trash.map((m) => m.messageId)).toEqual([root]);
+  });
+
+  it("archive and spam move a self-sent item once without deleting it", async () => {
+    const { fake, threadId, root } = selfSentThread();
+    const provider = new ImapProvider({ ...config, email: "me@proton.me" });
+    connection.client = fake.client;
+
+    await provider.archiveThread(threadId, "me@proton.me");
+
+    expect(mailboxesOf(fake).INBOX).toEqual([]);
+    expect(mailboxesOf(fake).Sent).toEqual([]);
+    expect(mailboxesOf(fake).Archive.map((m) => m.messageId)).toEqual([root]);
+
+    await provider.unarchiveThread(threadId);
+    expect(mailboxesOf(fake).Archive).toEqual([]);
+
+    await provider.markSpam(threadId);
+    const remaining = [
+      ...mailboxesOf(fake).INBOX,
+      ...mailboxesOf(fake).Sent,
+      ...mailboxesOf(fake).Spam,
+    ].map((m) => m.messageId);
+    expect(remaining).toEqual([root]);
   });
 });
