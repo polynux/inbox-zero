@@ -115,7 +115,10 @@ export class ImapProvider implements EmailProvider {
     return this.withConnection(async (client) => {
       await client.mailboxOpen(folder, { readOnly: true });
       const msg = await fetchMessageByUid(client, uid);
-      if (!msg) throw new Error(`Message ${messageId} not found`);
+      // A moved message keeps its old folder-qualified id, so like a
+      // vanished thread it reads as missing (Gmail/Outlook 404) rather
+      // than a 503 that retries forever.
+      if (!msg) throw new ImapMessageNotFoundError(messageId);
       return msg;
     });
   }
@@ -2469,5 +2472,12 @@ export class ImapThreadNotFoundError extends Error {
   constructor(threadId: string) {
     super(`Thread ${threadId} not found`);
     this.name = "ImapThreadNotFoundError";
+  }
+}
+
+export class ImapMessageNotFoundError extends Error {
+  constructor(messageId: string) {
+    super(`Message ${messageId} not found`);
+    this.name = "ImapMessageNotFoundError";
   }
 }

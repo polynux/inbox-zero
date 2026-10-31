@@ -6,7 +6,10 @@ import {
   InvalidMailboxSyncCursorError,
 } from "@/utils/email/mailbox-sync";
 import { ProviderRateLimitModeError } from "@/utils/email/rate-limit-mode-error";
-import { ImapThreadNotFoundError } from "@/utils/email/imap";
+import {
+  ImapMessageNotFoundError,
+  ImapThreadNotFoundError,
+} from "@/utils/email/imap";
 import { syncPageSchema } from "@inboxzero/mail-core/sync";
 import { createEmailProviderMailboxSource } from "./source";
 import type { EmailProvider } from "@/utils/email/types";
@@ -1226,13 +1229,16 @@ describe("createEmailProviderMailboxSource", () => {
       ]);
     }
   });
-  it("treats a vanished IMAP thread as missing instead of a 503", async () => {
+  it.each([
+    ["thread", new ImapThreadNotFoundError("t.root")],
+    ["message", new ImapMessageNotFoundError("1@SU5CT1g")],
+  ])("treats a vanished IMAP %s as missing instead of a 503", async (_, error) => {
     const source = createEmailProviderMailboxSource({
       accountId: "acc-1",
       provider: {
         name: "imap",
         async getMessage() {
-          throw new ImapThreadNotFoundError("t.root");
+          throw error;
         },
       } as unknown as EmailProvider,
     });

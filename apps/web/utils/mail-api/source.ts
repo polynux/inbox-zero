@@ -24,8 +24,10 @@ import {
 import { isProviderRateLimitModeError } from "@/utils/email/rate-limit-mode-error";
 import { extractErrorInfo as extractGmailErrorInfo } from "@/utils/gmail/retry";
 import { extractErrorInfo as extractOutlookErrorInfo } from "@/utils/outlook/retry";
-import { ImapThreadNotFoundError } from "@/utils/email/imap";
-import type { ParsedMessage } from "@/utils/types";
+import {
+  ImapMessageNotFoundError,
+  ImapThreadNotFoundError,
+} from "@/utils/email/imap";
 import { mapWithConcurrency } from "@/utils/async";
 import { convertEmailHtmlToText } from "@/utils/mail";
 
@@ -566,7 +568,11 @@ function encodedGmailCursorFromMessages(
 }
 
 function isMissingProviderResource(error: unknown) {
-  if (error instanceof ImapThreadNotFoundError) return true;
+  if (
+    error instanceof ImapThreadNotFoundError ||
+    error instanceof ImapMessageNotFoundError
+  )
+    return true;
   return (
     extractGmailErrorInfo(error).status === 404 ||
     extractOutlookErrorInfo(error).status === 404

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ImapProvider } from "@/utils/email/imap";
+import { ImapMessageNotFoundError, ImapProvider } from "@/utils/email/imap";
 import * as mailModule from "@/utils/imap/mail";
 import { encodeImapDraftId } from "@/utils/imap/draft";
 import { encodeImapMessageId } from "@/utils/imap/message-id";
@@ -1672,6 +1672,16 @@ describe("ImapProvider unknown threads", () => {
     await expect(
       new ImapProvider(config).getThreadMessages("no-such-thread"),
     ).rejects.toThrow(/not found/i);
+  });
+  it("getMessage throws ImapMessageNotFoundError for a vanished message", async () => {
+    const fake = createFakeClient([
+      { path: "INBOX", messages: [message(1, "2026-01-01")] },
+    ]);
+    connection.client = fake.client;
+
+    await expect(
+      new ImapProvider(config).getMessage(qualifiedId("INBOX", 999)),
+    ).rejects.toBeInstanceOf(ImapMessageNotFoundError);
   });
 
   it("archiveThread treats a vanished thread as a no-op (Gmail: 404 success)", async () => {
