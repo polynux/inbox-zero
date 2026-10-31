@@ -143,6 +143,7 @@ async function getImapDeltaPage(
         diff.knownUids,
       ),
       deletedMessageIds: diff.deletedMessageIds,
+      removedMessageIds: diff.removedMessageIds,
       hasMore: false,
       reset: false,
       upsertedMessages: [],
@@ -185,6 +186,7 @@ async function getImapDeltaPage(
       knownUids,
     ),
     deletedMessageIds: diff ? diff.deletedMessageIds : [],
+    removedMessageIds: diff ? diff.removedMessageIds : [],
     hasMore,
     reset: false,
     upsertedMessages: messages,
@@ -203,7 +205,11 @@ async function diffDeletedUids(
     emailAccountId: string;
     logger: Logger;
   },
-): Promise<{ deletedMessageIds: string[]; knownUids: string }> {
+): Promise<{
+  deletedMessageIds: string[];
+  removedMessageIds: string[];
+  knownUids: string;
+}> {
   const serverUids = await searchImapMessages(client, { all: true });
   const serverUidSet = new Set(serverUids);
   // A cursor written before knownUids existed bootstraps from the server's
@@ -212,22 +218,32 @@ async function diffDeletedUids(
     options.knownUids === undefined
       ? new Set(serverUids)
       : parseUidRanges(options.knownUids);
-  const deletedMessageIds = [...knownUidSet]
+  // IMAP has no tombstone feed: a UID missing from its folder was expunged
+  // there, but a MOVE also expunges the source copy while the message lives
+  // on elsewhere. Outlook reports the same ambiguity as removed-from-scope,
+  // so the message leaves this folder's views instead of being tombstoned
+  // while its new-folder copy syncs in under a new id. True deletes (Bridge
+  // expunges a message moved to Trash while already in Trash) surface when
+  // the Trash stream diffs its own folder.
+  const removedMessageIds = [...knownUidSet]
     .filter((uid) => !serverUidSet.has(uid))
     .sort((a, b) => a - b)
     .map((uid) => encodeImapMessageId(options.folder, uid));
 
-  if (deletedMessageIds.length > 0) {
-    options.logger.info("IMAP folder delta reports deleted messages", {
+  if (removedMessageIds.length > 0) {
+    options.logger.info("IMAP folder delta reports removed messages", {
       emailAccountId: options.emailAccountId,
       folder: options.folder,
-      count: deletedMessageIds.length,
+      count: removedMessageIds.length,
     });
   }
 
-  return { deletedMessageIds, knownUids: formatUidRanges(serverUids) };
+  return {
+    deletedMessageIds: [],
+    removedMessageIds,
+    knownUids: formatUidRanges(serverUids),
+  };
 }
-
 async function getImapSnapshotPage(
   client: ImapFlow,
   options: {

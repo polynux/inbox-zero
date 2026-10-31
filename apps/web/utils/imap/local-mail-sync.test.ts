@@ -214,7 +214,7 @@ describe("getImapMailboxSyncPage", () => {
     ]);
   });
 
-  it("reports an expunged UID as a deleted message id", async () => {
+  it("reports a UID missing from its folder as removed from scope", async () => {
     const first = await getImapMailboxSyncPage({
       ...baseInput,
       after: new Date("2025-01-01T00:00:00Z"),
@@ -227,7 +227,8 @@ describe("getImapMailboxSyncPage", () => {
       cursor: first.cursor,
     });
 
-    expect(page.deletedMessageIds).toEqual([qualifiedId(3)]);
+    expect(page.deletedMessageIds).toEqual([]);
+    expect(page.removedMessageIds).toEqual([qualifiedId(3)]);
     expect(lastUidOf(page.cursor)).toBe(5);
   });
 
@@ -246,7 +247,8 @@ describe("getImapMailboxSyncPage", () => {
     });
 
     expect(page.upsertedMessages).toEqual([]);
-    expect(page.deletedMessageIds).toEqual([qualifiedId(5)]);
+    expect(page.deletedMessageIds).toEqual([]);
+    expect(page.removedMessageIds).toEqual([qualifiedId(5)]);
     expect(lastUidOf(page.cursor)).toBe(5);
   });
 
@@ -262,9 +264,10 @@ describe("getImapMailboxSyncPage", () => {
     });
 
     expect(page.deletedMessageIds).toEqual([]);
+    expect(page.removedMessageIds).toEqual([]);
   });
 
-  it("runs the deletion diff once per multi-page delta run", async () => {
+  it("runs the removal diff once per multi-page delta run", async () => {
     const first = await getImapMailboxSyncPage({
       ...baseInput,
       after: new Date("2025-01-01T00:00:00Z"),
@@ -295,15 +298,17 @@ describe("getImapMailboxSyncPage", () => {
     // Only the last page reports the expunge; earlier pages carry the
     // range-set they were given.
     expect(pages[0].deletedMessageIds).toEqual([]);
+    expect(pages[0].removedMessageIds).toEqual([]);
     expect(knownUidsOf(pages[0].cursor)).toBe("1-5");
-    expect(pages[1].deletedMessageIds).toEqual([qualifiedId(3)]);
+    expect(pages[1].deletedMessageIds).toEqual([]);
+    expect(pages[1].removedMessageIds).toEqual([qualifiedId(3)]);
     expect(
       pages.flatMap((page) => page.upsertedMessages.map((m) => m.id)),
     ).toEqual([qualifiedId(4), qualifiedId(5), qualifiedId(6), qualifiedId(7)]);
     expect(knownUidsOf(pages[1].cursor)).toBe("1-2,4-7");
   });
 
-  it("tombstones a UID expunged after an abandoned delta run", async () => {
+  it("reports a UID missing after an abandoned delta run as removed", async () => {
     mailboxUids = [1, 2, 3, 4, 5, 6, 7, 8, 9];
     const firstPage = await getImapMailboxSyncPage({
       ...baseInput,
@@ -328,7 +333,8 @@ describe("getImapMailboxSyncPage", () => {
       limit: 10,
     });
 
-    expect(next.deletedMessageIds).toEqual([qualifiedId(6)]);
+    expect(next.deletedMessageIds).toEqual([]);
+    expect(next.removedMessageIds).toEqual([qualifiedId(6)]);
   });
 
   it("rejects cursors from another account or folder", async () => {
