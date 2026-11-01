@@ -64,7 +64,7 @@ describe("parseSearchQuery", () => {
   // (NOT a OR NOT b).
   it("expresses repeated keys as De Morgan NOT/OR", () => {
     expect(parseSearchQuery("invoice receipt").criteria).toEqual({
-      not: { or: [{ not: { body: "invoice" } }, { not: { body: "receipt" } }] },
+      not: { or: [{ not: { text: "invoice" } }, { not: { text: "receipt" } }] },
     });
   });
 
@@ -75,9 +75,9 @@ describe("parseSearchQuery", () => {
     });
   });
 
-  it("treats bare text as body search", () => {
+  it("treats bare text as TEXT search so headers match too", () => {
     expect(parseSearchQuery("important")).toEqual({
-      criteria: { body: "important" },
+      criteria: { text: "important" },
       hasAttachment: false,
     });
   });
@@ -89,9 +89,9 @@ describe("parseSearchQuery", () => {
     });
   });
 
-  it("keeps a bare quoted phrase as one body term", () => {
+  it("keeps a bare quoted phrase as one TEXT term", () => {
     expect(parseSearchQuery('"exact phrase"')).toEqual({
-      criteria: { body: "exact phrase" },
+      criteria: { text: "exact phrase" },
       hasAttachment: false,
     });
   });
@@ -104,7 +104,7 @@ describe("parseSearchQuery", () => {
     ).toEqual({
       from: "alice@example.com",
       subject: "weekly update",
-      body: "important",
+      text: "important",
     });
   });
 
@@ -113,13 +113,13 @@ describe("parseSearchQuery", () => {
       subject: "weekly update",
     });
     expect(parseSearchQuery('"exact phrase').criteria).toEqual({
-      body: "exact phrase",
+      text: "exact phrase",
     });
   });
 
-  it("returns has:attachment as a client-side filter flag, never BODY text", () => {
+  it("returns has:attachment as a client-side filter flag, never TEXT", () => {
     expect(parseSearchQuery("has:attachment invoice")).toEqual({
-      criteria: { body: "invoice" },
+      criteria: { text: "invoice" },
       hasAttachment: true,
     });
     expect(parseSearchQuery("has:attachment").criteria).toEqual({
@@ -127,14 +127,27 @@ describe("parseSearchQuery", () => {
     });
   });
 
-  it("drops unknown is:/has: tokens instead of searching them as body text", () => {
+  it("drops unknown is:/has: tokens instead of searching them as text", () => {
     expect(parseSearchQuery("is:snoozed invoice").criteria).toEqual({
-      body: "invoice",
+      text: "invoice",
     });
     expect(parseSearchQuery("has:click invoice").criteria).toEqual({
-      body: "invoice",
+      text: "invoice",
     });
     expect(parseSearchQuery("is:snoozed").criteria).toEqual({ all: true });
+  });
+
+  it("maps -is:starred to unflagged and drops keyless negations", () => {
+    expect(parseSearchQuery("-is:starred invoice").criteria).toEqual({
+      unflagged: true,
+      text: "invoice",
+    });
+    expect(parseSearchQuery("-has:attachment invoice").criteria).toEqual({
+      text: "invoice",
+    });
+    expect(parseSearchQuery("-has:attachment").criteria).toEqual({
+      all: true,
+    });
   });
 });
 
@@ -377,9 +390,9 @@ describe("convertImapMessage label ids", () => {
 });
 
 describe("parseSearchQuery mailbox scopes", () => {
-  it("drops in: scope tokens instead of searching them as body text", () => {
+  it("drops in: scope tokens instead of searching them as text", () => {
     expect(parseSearchQuery("in:trash invoice").criteria).toEqual({
-      body: "invoice",
+      text: "invoice",
     });
     expect(parseSearchQuery("in:archive").criteria).toEqual({ all: true });
   });

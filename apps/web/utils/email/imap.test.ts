@@ -4128,6 +4128,170 @@ describe("ImapProvider scoped provider search", () => {
     expect(criteria.some((c) => "body" in c)).toBe(false);
   });
 
+  it("uses TEXT per token for multi-word field-any so header matches hit", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          // "receipt" appears only in From: BODY-AND would miss it.
+          message(1, "2026-01-01", "receipt@x", undefined, {
+            subject: "invoice January",
+          }),
+          message(2, "2026-01-02", "bob@x", undefined, {
+            subject: "invoice February",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).searchMessages({
+      query: "",
+      mailboxSearch: {
+        mailbox: "inbox",
+        text: {
+          kind: "text",
+          field: "any",
+          value: "invoice receipt",
+          match: "term",
+        },
+      },
+    });
+    expect(result.messages.map((m) => m.id)).toEqual([qualifiedId("INBOX", 1)]);
+
+    const search = fake.client.search as unknown as {
+      mock: { calls: Array<[Record<string, unknown>]> };
+    };
+    const criteria = search.mock.calls.map(([c]) => c);
+    expect(JSON.stringify(criteria)).toContain('"text":"invoice"');
+    expect(JSON.stringify(criteria)).toContain('"text":"receipt"');
+    expect(JSON.stringify(criteria)).not.toContain('"body"');
+  });
+
+  it("keeps a two-word subject as one subject term", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, {
+            subject: "weekly update",
+          }),
+          message(2, "2026-01-02", "bob@x", undefined, {
+            subject: "weekly",
+            html: "no update here",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).searchMessages({
+      query: "",
+      mailboxSearch: {
+        mailbox: "inbox",
+        text: {
+          kind: "text",
+          field: "subject",
+          value: "weekly update",
+          match: "term",
+        },
+      },
+    });
+
+    expect(result.messages.map((m) => m.id)).toEqual([qualifiedId("INBOX", 1)]);
+    const search = fake.client.search as unknown as {
+      mock: { calls: Array<[Record<string, unknown>]> };
+    };
+    const criteria = search.mock.calls.map(([c]) => c);
+    expect(
+      criteria.some((c) => "subject" in c && c.subject === "weekly update"),
+    ).toBe(true);
+    expect(criteria.some((c) => "body" in c || "text" in c)).toBe(false);
+  });
+
+  it("honors starred:false with an unflagged SEARCH", async () => {
+    const fake = scopedMailboxes();
+    connection.client = fake.client;
+
+    await new ImapProvider(config).searchMessages({
+      query: "",
+      mailboxSearch: { mailbox: "trash", starred: false },
+    });
+
+    const search = fake.client.search as unknown as {
+      mock: { calls: Array<[Record<string, unknown>]> };
+    };
+    const criteria = search.mock.calls.map(([c]) => c);
+    expect(criteria.some((c) => "unflagged" in c)).toBe(true);
+    expect(criteria.some((c) => "flagged" in c)).toBe(false);
+  });
+
+  it("honors starred:true with a flagged SEARCH", async () => {
+    const fake = scopedMailboxes();
+    connection.client = fake.client;
+
+    await new ImapProvider(config).searchMessages({
+      query: "",
+      mailboxSearch: { mailbox: "trash", starred: true },
+    });
+
+    const search = fake.client.search as unknown as {
+      mock: { calls: Array<[Record<string, unknown>]> };
+    };
+    const criteria = search.mock.calls.map(([c]) => c);
+    expect(criteria.some((c) => "flagged" in c)).toBe(true);
+  });
+
+  it("returns only attachment-less mail for hasAttachment:false", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, {
+            subject: "with file",
+            hasAttachment: true,
+          }),
+          message(2, "2026-01-02", "bob@x", undefined, {
+            subject: "plain note",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).searchMessages({
+      query: "",
+      mailboxSearch: { mailbox: "inbox", hasAttachment: false },
+    });
+
+    expect(result.messages.map((m) => m.id)).toEqual([qualifiedId("INBOX", 2)]);
+  });
+
+  it("returns only mail with attachments for hasAttachment:true", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", "alice@x", undefined, {
+            subject: "with file",
+            hasAttachment: true,
+          }),
+          message(2, "2026-01-02", "bob@x", undefined, {
+            subject: "plain note",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const result = await new ImapProvider(config).searchMessages({
+      query: "",
+      mailboxSearch: { mailbox: "inbox", hasAttachment: true },
+    });
+
+    expect(result.messages.map((m) => m.id)).toEqual([qualifiedId("INBOX", 1)]);
+  });
+
   it("scopes legacy searchThreads to the trash folder", async () => {
     const fake = scopedMailboxes();
     connection.client = fake.client;
@@ -4182,6 +4346,28 @@ describe("ImapProvider.getFolderCounts", () => {
     expect(counts).toEqual([
       { id: "INBOX", name: "INBOX", total: 1, unread: 0, systemType: "INBOX" },
       { id: "Work", name: "Work", total: 1, unread: 0 },
+    ]);
+  });
+
+  it("skips unselectable containers and view mailboxes", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        specialUse: "\\Inbox",
+        messages: [message(1, "2026-01-01")],
+      },
+      { path: "Folders", flags: ["\\Noselect"], messages: [] },
+      { path: "Labels", flags: ["\\Noselect"], messages: [] },
+      { path: "All Mail", messages: [message(1, "2026-01-01")] },
+      { path: "Starred", messages: [message(1, "2026-01-01")] },
+      { path: "Labels/Work", messages: [message(1, "2026-01-01")] },
+    ]);
+    connection.client = fake.client;
+
+    const counts = await new ImapProvider(config).getFolderCounts();
+
+    expect(counts).toEqual([
+      { id: "INBOX", name: "INBOX", total: 1, unread: 0, systemType: "INBOX" },
     ]);
   });
 });

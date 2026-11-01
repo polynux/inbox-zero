@@ -2103,7 +2103,23 @@ ${messageContent}
 
   async getFolderCounts(): Promise<EmailFolderCount[]> {
     return this.withConnection(async (client) => {
-      const folders = await listFoldersAsOutlookFolders(client);
+      // Unselectable containers STATUS-fail into phantom 0-total rows, and
+      // view mailboxes (All Mail, Starred, Labels/*) double-count mail that
+      // lives in a real folder, so neither is counted.
+      const selectable = new Set(
+        (await client.list())
+          .filter(
+            (mailbox) =>
+              !mailbox.flags.has("\\Noselect") &&
+              !isFallbackViewFolder(mailbox.path) &&
+              mailbox.specialUse !== "\\All" &&
+              mailbox.specialUse !== "\\Flagged",
+          )
+          .map((mailbox) => mailbox.path),
+      );
+      const folders = (await listFoldersAsOutlookFolders(client)).filter(
+        (folder) => selectable.has(folder.id),
+      );
       const counts: EmailFolderCount[] = [];
       for (const folder of folders) {
         try {
@@ -2854,7 +2870,9 @@ function mailboxSearchQuery(search: ProviderMailboxSearch): string {
     parts.push(search.read ? "is:read" : "is:unread");
   if (search.starred !== undefined)
     parts.push(search.starred ? "is:starred" : "-is:starred");
-  if (search.hasAttachment) parts.push("has:attachment");
+  // Only the positive attachment filter has a query form; the false polarity
+  // is re-applied by the local filter over the candidates.
+  if (search.hasAttachment === true) parts.push("has:attachment");
   return parts.join(" ");
 }
 
@@ -2877,20 +2895,19 @@ async function searchImapFolder(
   );
   if (options.search.read !== undefined)
     criteria[options.search.read ? "seen" : "unseen"] = true;
-  if (options.search.starred) criteria.flagged = true;
-  // IMAP TEXT covers headers + body; the local filter re-applies the scope.
-  const { body, ...restCriteria } = criteria;
-  const searchCriteria =
-    options.search.text?.field === "any" && body !== undefined
-      ? { ...restCriteria, text: body }
-      : criteria;
-  const uids = await searchImapMessages(client, searchCriteria);
+  if (options.search.starred !== undefined)
+    criteria[options.search.starred ? "flagged" : "unflagged"] = true;
+  const uids = await searchImapMessages(client, criteria);
   const dated = await fetchInternalDatesByUids(client, uids);
   dated.sort((a, b) => b.time - a.time || b.uid - a.uid);
   let candidates = dated;
   const maxResults = options.maxResults || 20;
   const offset = options.pageToken ? Number(options.pageToken) : 0;
-  if (hasAttachment || options.search.hasAttachment) {
+  const wantsAttachments =
+    hasAttachment || options.search.hasAttachment === true;
+  const wantsNoAttachments =
+    !hasAttachment && options.search.hasAttachment === false;
+  if (wantsAttachments || wantsNoAttachments) {
     await client.mailboxOpen(options.folder, { readOnly: true });
     const fetched = await fetchMessagesByUids(
       client,
@@ -2898,7 +2915,11 @@ async function searchImapFolder(
     );
     const keep = new Set(
       fetched
-        .filter((m) => m.attachments && m.attachments.length > 0)
+        .filter((m) =>
+          wantsNoAttachments
+            ? !m.attachments?.length
+            : Boolean(m.attachments?.length),
+        )
         .map((m) => m.id),
     );
     candidates = dated.filter((entry) =>
@@ -2930,8 +2951,12 @@ function mailboxSearchText(search: ProviderMailboxSearch): string {
   if (!search.text) return "";
   const value = search.text.value.trim();
   if (!value) return "";
-  if (search.text.field === "subject") return `subject:${value}`;
-  if (search.text.field === "body") return value;
+  // Quote so multi-word values stay one term: subject:weekly update would
+  // otherwise parse as subject:weekly plus a body term.
+  if (search.text.field === "subject")
+    return `subject:"${value.replace(/"/g, "")}"`;
+  if (search.text.field === "body")
+    return search.text.match === "phrase" ? `"${value}"` : value;
   return search.text.match === "phrase" ? `"${value}"` : value;
 }
 

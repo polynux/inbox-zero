@@ -468,12 +468,14 @@ export function parseReferencesHeader(raw: Buffer): { references: string } {
  * imapflow ANDs the keys of one object natively, so distinct terms merge
  * into a single object (imapflow has no `and` operator: `{and: [...]}` used
  * to compile to a bare UID SEARCH, which Bridge answers `false` to). A key
- * repeated with different values (two body phrases) cannot merge, so the
+ * repeated with different values (two bare phrases) cannot merge, so the
  * first stays in the query and the rest combine as De Morgan NOT/OR, which
- * core IMAP supports. `is:seen`, `is:starred` map to flags; `has:attachment`
- * cannot be SEARCHed (no BODYSTRUCTURE key in RFC 3501), so it comes back as
- * a client-side filter flag instead of BODY text. Unknown `is:`/`has:`
- * tokens are dropped, never body text.
+ * core IMAP supports. Bare terms map to TEXT (headers + body), never BODY:
+ * a subject- or from-only match must hit. `is:seen`, `is:starred` map to
+ * flags (`-is:starred` negates); `has:attachment` cannot be SEARCHed (no
+ * BODYSTRUCTURE key in RFC 3501), so it comes back as a client-side filter
+ * flag instead of TEXT. Unknown `is:`/`has:` tokens and operator negations
+ * without a SEARCH key are dropped, never search text.
  */
 export function parseSearchQuery(query: string): {
   criteria: Record<string, unknown>;
@@ -504,11 +506,21 @@ export function parseSearchQuery(query: string): {
       addTerm({ seen: true });
     } else if (part === "is:starred" || part === "is:flagged") {
       addTerm({ flagged: true });
+    } else if (part === "-is:starred" || part === "-is:flagged") {
+      addTerm({ unflagged: true });
     } else if (part === "has:attachment") {
       hasAttachment = true;
-    } else if (field === "is" || field === "has" || field === "in") {
-      // Unknown is:/has: token or a mailbox scope (in:trash) the folder
-      // fan-out already applied: drop, never body text.
+    } else if (
+      field === "is" ||
+      field === "has" ||
+      field === "in" ||
+      part.startsWith("-is:") ||
+      part.startsWith("-has:") ||
+      part.startsWith("-in:")
+    ) {
+      // Unknown is:/has: token, a mailbox scope (in:trash) the folder
+      // fan-out already applied, or a negation with no SEARCH equivalent
+      // (-has:attachment needs a client-side filter): drop, never text.
     } else if (field === "from") {
       addTerm({ from: value });
     } else if (field === "to") {
@@ -520,7 +532,7 @@ export function parseSearchQuery(query: string): {
     } else if (field === "before") {
       addTerm({ before: new Date(value) });
     } else {
-      addTerm({ body: unquote(part) });
+      addTerm({ text: unquote(part) });
     }
   }
 
