@@ -87,6 +87,77 @@ describe("createEmailProviderOperationExecutor", () => {
     });
   });
 
+  it("confirms a label apply whose re-read cannot show the placement", async () => {
+    const labelMessage = vi.fn();
+    const executor = createEmailProviderOperationExecutor({
+      accountId: "acc-1",
+      provider: {
+        name: "imap",
+        labelMessage,
+        async getMessage(id: string) {
+          return {
+            id,
+            threadId: "t-1",
+            headers: { from: "ada@example.com", to: "me@example.com" },
+            // The Labels/* placement lives outside the message's own folder,
+            // so the re-read never carries it.
+            labelIds: ["INBOX"],
+            snippet: id,
+          };
+        },
+        async getMessagesBatch(ids: string[]) {
+          return ids.map((id) => ({
+            id,
+            threadId: "t-1",
+            headers: { from: "ada@example.com", to: "me@example.com" },
+            labelIds: ["INBOX"],
+            snippet: id,
+          }));
+        },
+      } as unknown as EmailProvider,
+    });
+    const operation: PreparedOperation = {
+      ...metadataOperation([{ accountId: "acc-1", messageId: "m1" }]),
+      intent: {
+        kind: "metadata",
+        targets: [{ accountId: "acc-1", messageId: "m1" }],
+        change: {
+          kind: "set_membership",
+          membership: "label",
+          id: "Labels/Work",
+          present: true,
+        },
+      },
+    };
+    const result = await executor.execute({
+      operation,
+      attemptId: "a1",
+      signal: new AbortController().signal,
+    });
+
+    expect(labelMessage).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("confirmed");
+    if (result.status !== "confirmed") throw new Error("expected confirmed");
+    expect(result.targets).toEqual([
+      {
+        key: { accountId: "acc-1", messageId: "m1" },
+        outcome: "applied",
+        code: null,
+      },
+    ]);
+    // The observation carries the applied label so the chip and the label
+    // view match without waiting for a sync that can never report it.
+    const patch = result.observations.find(
+      (change) => change.kind === "message_patch",
+    );
+    expect(patch).toMatchObject({
+      kind: "message_patch",
+      key: { accountId: "acc-1", messageId: "m1" },
+    });
+    if (patch?.kind !== "message_patch") throw new Error("expected a patch");
+    expect(patch.fields.labelIds).toContain("Labels/Work");
+  });
+
   it("archives every target with one provider call and one batched read", async () => {
     const archiveMessages = vi.fn();
     const getMessage = vi.fn();

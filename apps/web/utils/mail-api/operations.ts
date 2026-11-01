@@ -120,11 +120,12 @@ async function executeMetadataPerTarget(
       await applyChange(provider, operation.intent.change, [target.messageId]);
       try {
         const message = await provider.getMessage(target.messageId);
-        const patch = parsedMessagePatch(accountId, provider.name, message);
+        const observed = withAppliedLabel(message, operation.intent.change);
+        const patch = parsedMessagePatch(accountId, provider.name, observed);
         if (patch) observations.push(patch);
         if (
           !metadataChangeSatisfied(
-            message,
+            observed,
             operation.intent.change,
             provider.name,
           )
@@ -175,11 +176,12 @@ async function observeAppliedMetadata(
     for (const target of batch) {
       const message = messagesById.get(target.messageId);
       if (message) {
-        const patch = parsedMessagePatch(accountId, provider.name, message);
+        const observed = withAppliedLabel(message, operation.intent.change);
+        const patch = parsedMessagePatch(accountId, provider.name, observed);
         if (patch) observations.push(patch);
         if (
           !metadataChangeSatisfied(
-            message,
+            observed,
             operation.intent.change,
             provider.name,
           )
@@ -854,6 +856,28 @@ function sendMutationId(operationId: string) {
 
 function isHexChar(value: string) {
   return (value >= "0" && value <= "9") || (value >= "a" && value <= "f");
+}
+
+// The provider call above succeeded, so a label it just applied is on the
+// message even when the re-read cannot show it (IMAP label placements live in
+// Labels/* mailboxes, never in the re-read message's own folder). Fold the
+// applied id into the observation and the satisfaction check; without this
+// every label apply ends uncertain and starves later operations on the same
+// messages behind the dependency gate.
+function withAppliedLabel(
+  message: ParsedMessage,
+  change: MetadataChange,
+): ParsedMessage {
+  if (
+    change.kind !== "set_membership" ||
+    change.membership !== "label" ||
+    !change.present ||
+    !change.id ||
+    message.labelIds?.includes(change.id)
+  ) {
+    return message;
+  }
+  return { ...message, labelIds: [...(message.labelIds ?? []), change.id] };
 }
 
 function metadataChangeSatisfied(
