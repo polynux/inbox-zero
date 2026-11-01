@@ -576,6 +576,25 @@ function isMissingProviderResource(error: unknown) {
     error instanceof ImapMessageNotFoundError
   )
     return true;
+  // Name checks (not instanceof) survive duplicated module instances, which
+  // tsx/Next module graphs can produce for these error classes.
+  if (
+    error instanceof Error &&
+    (error.name === "ImapThreadNotFoundError" ||
+      error.name === "ImapMessageNotFoundError")
+  )
+    return true;
+  // A key the IMAP id parser rejects (a stable draft id, a stale or
+  // foreign-form id) names no readable message: report it unresolved like a
+  // 404 instead of pausing the whole hydration batch into a retry loop.
+  if (
+    error instanceof Error &&
+    (error.name === "SafeError" || error.name === "DraftNotFoundError") &&
+    /not a (folder-qualified IMAP id|stable IMAP draft id)|holds an? (invalid|empty|undecodable)/.test(
+      error.message,
+    )
+  )
+    return true;
   return (
     extractGmailErrorInfo(error).status === 404 ||
     extractOutlookErrorInfo(error).status === 404

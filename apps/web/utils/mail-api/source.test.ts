@@ -11,8 +11,8 @@ import {
   ImapThreadNotFoundError,
 } from "@/utils/email/imap";
 import { syncPageSchema } from "@inboxzero/mail-core/sync";
+import { parseImapMessageId } from "@/utils/imap/message-id";
 import { createEmailProviderMailboxSource } from "./source";
-import type { EmailProvider } from "@/utils/email/types";
 
 vi.mock("server-only", () => ({}));
 
@@ -1294,6 +1294,39 @@ describe("createEmailProviderMailboxSource", () => {
         unresolved: [
           {
             key: { accountId: "acc-1", messageId: "1@SU5CT1g" },
+            reason: "not_found",
+          },
+        ],
+      },
+    });
+  });
+
+  it("treats an IMAP key the id parser rejects as missing instead of pausing", async () => {
+    const source = createEmailProviderMailboxSource({
+      accountId: "acc-1",
+      provider: {
+        name: "imap",
+        async getMessage(messageId: string) {
+          // parseImapMessageId's rejection of a stable draft id.
+          return parseImapMessageId(messageId);
+        },
+      } as unknown as EmailProvider,
+    });
+    const result = await source.hydrate({
+      session: { accountId: "acc-1", generation: "g1" },
+      requestId: "r1",
+      signal: new AbortController().signal,
+      keys: [{ accountId: "acc-1", messageId: "d.e30" }],
+      purpose: "body",
+    });
+    expect(result).toEqual({
+      status: "ok",
+      value: {
+        changes: [],
+        bodies: [],
+        unresolved: [
+          {
+            key: { accountId: "acc-1", messageId: "d.e30" },
             reason: "not_found",
           },
         ],

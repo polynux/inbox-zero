@@ -2125,6 +2125,42 @@ describe("ImapProvider unknown threads", () => {
     ).rejects.toBeInstanceOf(ImapMessageNotFoundError);
   });
 
+  it("getMessagesBatch fetches each folder's UIDs", async () => {
+    const fake = createFakeClient([
+      {
+        path: "INBOX",
+        messages: [
+          message(1, "2026-01-01", undefined, undefined, {
+            subject: "one",
+          }),
+          message(2, "2026-01-02", undefined, undefined, {
+            subject: "two",
+          }),
+        ],
+      },
+      {
+        path: "Sent",
+        specialUse: "\\Sent",
+        messages: [
+          message(9, "2026-01-03", undefined, undefined, {
+            subject: "sent",
+          }),
+        ],
+      },
+    ]);
+    connection.client = fake.client;
+
+    const messages = await new ImapProvider(config).getMessagesBatch([
+      qualifiedId("INBOX", 2),
+      qualifiedId("Sent", 9),
+    ]);
+
+    expect(messages.map((item) => item.subject).sort()).toEqual([
+      "sent",
+      "two",
+    ]);
+  });
+
   it("archiveThread treats a vanished thread as a no-op (Gmail: 404 success)", async () => {
     const fake = createFakeClient([{ path: "INBOX", messages: [] }]);
     connection.client = fake.client;

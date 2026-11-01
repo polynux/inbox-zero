@@ -163,9 +163,14 @@ export class ImapProvider implements EmailProvider {
     return this.withConnection(async (client) => {
       const grouped = groupMessageIdsByFolder(messageIds);
       const messages: ParsedMessage[] = [];
-      for (const [folder, uids] of grouped) {
+      for (const [folder, entries] of grouped) {
         await client.mailboxOpen(folder, { readOnly: true });
-        messages.push(...(await fetchMessagesByUids(client, uids)));
+        messages.push(
+          ...(await fetchMessagesByUids(
+            client,
+            entries.map((entry) => entry.uid),
+          )),
+        );
       }
       return messages;
     });
