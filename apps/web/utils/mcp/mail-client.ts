@@ -103,7 +103,10 @@ export async function browseMailForMcp(
     threads: page.threads.map((thread) => ({
       id: thread.id,
       messages: thread.messages.map((message) =>
-        serializeMail(message, !parsedMessageMetadata(message).read),
+        serializeMail(
+          message,
+          !parsedMessageMetadata(message, provider.name).read,
+        ),
       ),
     })),
     nextPageToken: page.nextPageToken ?? null,
@@ -129,7 +132,7 @@ export async function readMailForMcp(
     threadId: args.threadId,
     messages: await Promise.all(
       messages.map(async (message) => {
-        const metadata = parsedMessageMetadata(message);
+        const metadata = parsedMessageMetadata(message, provider.name);
         const serialized = serializeMail(message, !metadata.read, true);
         if (metadata.roles.includes("draft"))
           serialized.draftId =

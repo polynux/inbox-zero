@@ -133,6 +133,26 @@ describe("parsedMessageMetadata", () => {
     expect(metadata.roles).toEqual([]);
     expect(metadata.read).toBe(false);
   });
+
+  it("does not infer IMAP roles from folder-name substrings", () => {
+    const metadata = parsedMessageMetadata(
+      {
+        id: "7@Rn9sZGVycw",
+        threadId: "t.thread",
+        historyId: "Folders/Presentations:7",
+        date: "2026-01-01T00:00:00.000Z",
+        parentFolderId: "Folders/Presentations",
+        subject: "Slides",
+        snippet: "Slides",
+        labelIds: ["UNREAD"],
+        headers: { from: "ada@example.com", to: "me@example.com", date: "" },
+        inline: [],
+      } as ParsedMessage,
+      "imap",
+    );
+    expect(metadata.roles).toEqual([]);
+    expect(metadata.folderId).toBe("Folders/Presentations");
+  });
 });
 
 describe("parsedMessageBodyObservation", () => {

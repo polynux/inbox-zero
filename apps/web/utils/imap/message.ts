@@ -356,6 +356,10 @@ export async function convertImapMessage(
     return {
       id: msg.uid ? encodeImapMessageId(folderPath, msg.uid) : String(msg.uid),
       threadId,
+      // The store keys folder membership and scope diffs off this; without it
+      // every IMAP row reads as folder-less and folder-leave events match
+      // nothing.
+      parentFolderId: folderPath,
       historyId: msg.uid ? `${folderPath}:${msg.uid}` : String(msg.uid),
       date,
       headers,

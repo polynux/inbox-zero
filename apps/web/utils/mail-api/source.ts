@@ -364,7 +364,7 @@ export function createEmailProviderMailboxSource(input: {
         result.messages,
         5,
         async (message) => {
-          const fields = searchMessageFields(accountId, message);
+          const fields = searchMessageFields(accountId, message, provider.name);
           if (!messageMatchesPredicate(fields, compiled.filter)) return null;
           const text = compiled.search.text;
           if (!text || messageMatchesPredicate(fields, text)) return message;
@@ -376,7 +376,11 @@ export function createEmailProviderMailboxSource(input: {
             return null;
           // List projections can omit the body that made the provider return this candidate.
           const fullMessage = await provider.getMessage(message.id);
-          const fullFields = searchMessageFields(accountId, fullMessage);
+          const fullFields = searchMessageFields(
+            accountId,
+            fullMessage,
+            provider.name,
+          );
           return messageMatchesPredicate(fullFields, compiled.filter) &&
             messageMatchesPredicate(fullFields, text)
             ? fullMessage
@@ -710,9 +714,13 @@ async function* streamToIterable(stream: ReadableStream<Uint8Array>) {
   }
 }
 
-function searchMessageFields(accountId: string, message: ParsedMessage) {
+function searchMessageFields(
+  accountId: string,
+  message: ParsedMessage,
+  provider: Provider,
+) {
   return {
-    ...parsedMessageMetadata(message),
+    ...parsedMessageMetadata(message, provider),
     accountId,
     messageId: message.id,
     conversationId: message.threadId,

@@ -329,6 +329,15 @@ describe("convertImapMessage label ids", () => {
     expect(parsed?.labelIds).not.toContain("INBOX");
   });
 
+  it("carries the folder path so the store can key folder membership", async () => {
+    const parsed = await convertImapMessage(
+      { ...baseMessage } as never,
+      undefined,
+      "INBOX",
+    );
+    expect(parsed?.parentFolderId).toBe("INBOX");
+  });
+
   it("keeps custom keywords", async () => {
     const parsed = await convertImapMessage(
       { ...baseMessage, flags: new Set(["$MailFlagBit0"]) } as never,

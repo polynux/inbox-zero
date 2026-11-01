@@ -35,18 +35,25 @@ const ROLE_LABELS = {
   SPAM: "spam",
 } as const;
 
-export function parsedMessageMetadata(message: ParsedMessage): MessageMetadata {
+export function parsedMessageMetadata(
+  message: ParsedMessage,
+  provider?: Provider,
+): MessageMetadata {
   const labels = message.labelIds ?? [];
   const archived = labels.includes("ARCHIVE");
-  const roles = [
-    ...new Set([
-      ...labels.flatMap((label) => {
-        const role = ROLE_LABELS[label as keyof typeof ROLE_LABELS];
-        return role ? [role] : [];
-      }),
-      ...rolesFromFolder(message.parentFolderId),
-    ]),
-  ].filter((role) => role !== "inbox" || !archived);
+  const labelRoles = labels.flatMap((label) => {
+    const role = ROLE_LABELS[label as keyof typeof ROLE_LABELS];
+    return role ? [role] : [];
+  });
+  // IMAP folder ids are human-readable paths whose role labels are already
+  // strictly derived (special-use, then exact well-known names), so substring
+  // inference here would misread user folders ("Presentations" contains
+  // "sent"). Opaque ids (Outlook GUIDs) keep the loose fallback.
+  const folderRoles =
+    provider === "imap" ? [] : rolesFromFolder(message.parentFolderId);
+  const roles = [...new Set([...labelRoles, ...folderRoles])].filter(
+    (role) => role !== "inbox" || !archived,
+  );
   const categoryIds = labels.filter((label) => label.startsWith("CATEGORY_"));
   const labelIds = labels.filter(
     (label) =>
@@ -97,7 +104,7 @@ export function parsedMessagePatch(
       conversationId: message.threadId,
       version: message.historyId || null,
     },
-    fields: parsedMessageMetadata(message),
+    fields: parsedMessageMetadata(message, provider),
   });
 }
 

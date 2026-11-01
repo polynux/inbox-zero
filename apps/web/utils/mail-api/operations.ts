@@ -9,6 +9,7 @@ import type {
   TargetOutcome,
 } from "@inboxzero/mail-core/operations";
 import type { MetadataChange } from "@inboxzero/mail-core/commands";
+import type { Provider } from "@inboxzero/mail-core/identities";
 import type {
   BodyObservation,
   ProviderChange,
@@ -121,7 +122,13 @@ async function executeMetadataPerTarget(
         const message = await provider.getMessage(target.messageId);
         const patch = parsedMessagePatch(accountId, provider.name, message);
         if (patch) observations.push(patch);
-        if (!metadataChangeSatisfied(message, operation.intent.change)) {
+        if (
+          !metadataChangeSatisfied(
+            message,
+            operation.intent.change,
+            provider.name,
+          )
+        ) {
           targets.push({
             key: target,
             outcome: "uncertain",
@@ -170,7 +177,13 @@ async function observeAppliedMetadata(
       if (message) {
         const patch = parsedMessagePatch(accountId, provider.name, message);
         if (patch) observations.push(patch);
-        if (!metadataChangeSatisfied(message, operation.intent.change)) {
+        if (
+          !metadataChangeSatisfied(
+            message,
+            operation.intent.change,
+            provider.name,
+          )
+        ) {
           targets.push({
             key: target,
             outcome: "uncertain",
@@ -222,6 +235,7 @@ async function inspectMetadataOperation(
       const satisfied = metadataChangeSatisfied(
         message,
         operation.intent.change,
+        provider.name,
       );
       targets.push({
         key: target,
@@ -470,7 +484,11 @@ async function executeSnooze(
       try {
         const archivedMessage = await provider.getMessage(target.messageId);
         if (
-          !metadataChangeSatisfied(archivedMessage, operation.intent.change)
+          !metadataChangeSatisfied(
+            archivedMessage,
+            operation.intent.change,
+            provider.name,
+          )
         ) {
           targets.push({
             key: target,
@@ -499,7 +517,11 @@ async function executeSnooze(
         try {
           const archivedMessage = await provider.getMessage(target.messageId);
           if (
-            !metadataChangeSatisfied(archivedMessage, operation.intent.change)
+            !metadataChangeSatisfied(
+              archivedMessage,
+              operation.intent.change,
+              provider.name,
+            )
           ) {
             targets.push({
               key: target,
@@ -837,8 +859,9 @@ function isHexChar(value: string) {
 function metadataChangeSatisfied(
   message: ParsedMessage,
   change: MetadataChange,
+  provider?: Provider,
 ): boolean {
-  const metadata = parsedMessageMetadata(message);
+  const metadata = parsedMessageMetadata(message, provider);
   switch (change.kind) {
     case "archive":
       return !metadata.roles.includes("inbox");

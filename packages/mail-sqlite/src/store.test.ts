@@ -148,6 +148,74 @@ describe("sqlite mail store", () => {
     await store.close();
   });
 
+  it("keeps the thread visible when a moved IMAP copy replaces its tombstoned id", async () => {
+    const store = await createSqliteMailStore(createNodeSqliteDriver());
+    const session = { accountId: "acc-1", generation: "g1" };
+    // The browser engine files IMAP accounts under the google provider label;
+    // only the folder-qualified id shape matters here.
+    await store.ensureAccount({
+      accountId: "acc-1",
+      provider: "google",
+      generation: "g1",
+    });
+    const oldPlace = messagePatch("7@SU5CT1g", "t.thread", 1000, ["inbox"]);
+    oldPlace.fields.folderId = "INBOX";
+    await store.applySyncPage({
+      ownerId: "owner",
+      page: {
+        session,
+        requestId: "seed",
+        from: { streamId: "INBOX", generation: "g1", checkpoint: null },
+        to: { streamId: "INBOX", generation: "g1", checkpoint: "1" },
+        changes: [oldPlace],
+        requiredHydration: [],
+        roundComplete: true,
+      },
+    });
+    // The INBOX delta tombstones the dead folder-qualified id while the
+    // Archive delta upserts the moved copy under its new id in the same tick.
+    const newPlace = messagePatch("9@QXJjaGl2ZQ", "t.thread", 1000, []);
+    newPlace.fields.folderId = "Archive";
+    await store.applySyncPage({
+      ownerId: "owner",
+      page: {
+        session,
+        requestId: "move",
+        from: { streamId: "INBOX", generation: "g1", checkpoint: "1" },
+        to: { streamId: "INBOX", generation: "g1", checkpoint: "2" },
+        changes: [
+          {
+            kind: "message_deleted",
+            key: { accountId: "acc-1", messageId: "7@SU5CT1g" },
+            evidence: "move",
+          },
+          newPlace,
+        ],
+        requiredHydration: [],
+        roundComplete: true,
+      },
+    });
+    const archive = await store.readMailboxView({
+      accountIds: ["acc-1"],
+      predicate: { kind: "mailbox", mailbox: "archive" },
+      order: "newest_first",
+      pageSize: 25,
+      after: null,
+    });
+    expect(
+      archive.view.conversations.map((row) => row.key.conversationId),
+    ).toEqual(["t.thread"]);
+    const inbox = await store.readMailboxView(inboxQuery);
+    expect(inbox.view.conversations).toEqual([]);
+    const thread = await store.readConversation(
+      { accountId: "acc-1", conversationId: "t.thread" },
+      { pageSize: 10, after: null },
+    );
+    expect(thread.view.messages.map((m) => m.key.messageId)).toEqual([
+      "9@QXJjaGl2ZQ",
+    ]);
+  });
+
   it("flags a conversation with attachments when any message has one", async () => {
     const store = await createSqliteMailStore(createNodeSqliteDriver());
     await store.ensureAccount({

@@ -143,7 +143,6 @@ async function getImapDeltaPage(
         diff.knownUids,
       ),
       deletedMessageIds: diff.deletedMessageIds,
-      removedMessageIds: diff.removedMessageIds,
       hasMore: false,
       reset: false,
       upsertedMessages: [],
@@ -186,7 +185,6 @@ async function getImapDeltaPage(
       knownUids,
     ),
     deletedMessageIds: diff ? diff.deletedMessageIds : [],
-    removedMessageIds: diff ? diff.removedMessageIds : [],
     hasMore,
     reset: false,
     upsertedMessages: messages,
@@ -205,11 +203,7 @@ async function diffDeletedUids(
     emailAccountId: string;
     logger: Logger;
   },
-): Promise<{
-  deletedMessageIds: string[];
-  removedMessageIds: string[];
-  knownUids: string;
-}> {
+): Promise<{ deletedMessageIds: string[]; knownUids: string }> {
   const serverUids = await searchImapMessages(client, { all: true });
   const serverUidSet = new Set(serverUids);
   // A cursor written before knownUids existed bootstraps from the server's
@@ -218,29 +212,29 @@ async function diffDeletedUids(
     options.knownUids === undefined
       ? new Set(serverUids)
       : parseUidRanges(options.knownUids);
-  // IMAP has no tombstone feed: a UID missing from its folder was expunged
-  // there, but a MOVE also expunges the source copy while the message lives
-  // on elsewhere. Outlook reports the same ambiguity as removed-from-scope,
-  // so the message leaves this folder's views instead of being tombstoned
-  // while its new-folder copy syncs in under a new id. True deletes (Bridge
-  // expunges a message moved to Trash while already in Trash) surface when
-  // the Trash stream diffs its own folder.
-  const removedMessageIds = [...knownUidSet]
+  // IMAP has no tombstone feed, but a folder-qualified id names one placement
+  // only: once its UID leaves the folder that id is dead, whether the message
+  // moved elsewhere or was truly deleted. Tombstone it so the stale row leaves
+  // every view; the moved copy syncs in under its own id through its folder's
+  // own stream in the same batch, so the thread never empties. (Reporting it
+  // as removed-from-scope instead left the row behind: the store only strips
+  // inbox membership there, and a stripped-but-kept row would render as a
+  // phantom message with a dead id.)
+  const deletedMessageIds = [...knownUidSet]
     .filter((uid) => !serverUidSet.has(uid))
     .sort((a, b) => a - b)
     .map((uid) => encodeImapMessageId(options.folder, uid));
 
-  if (removedMessageIds.length > 0) {
-    options.logger.info("IMAP folder delta reports removed messages", {
+  if (deletedMessageIds.length > 0) {
+    options.logger.info("IMAP folder delta reports deleted messages", {
       emailAccountId: options.emailAccountId,
       folder: options.folder,
-      count: removedMessageIds.length,
+      count: deletedMessageIds.length,
     });
   }
 
   return {
-    deletedMessageIds: [],
-    removedMessageIds,
+    deletedMessageIds,
     knownUids: formatUidRanges(serverUids),
   };
 }
