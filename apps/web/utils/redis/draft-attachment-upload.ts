@@ -10,6 +10,10 @@ type DraftAttachmentUpload = {
   sessionUri: string;
   totalBytes: number;
   nextOffset: number;
+  /** The uploaded file's identity, so completion can return the id the draft lists it under. */
+  filename?: string;
+  mimeType?: string;
+  size?: number;
 };
 
 // IMAP has no resumable-upload endpoint: chunks accumulate here until the

@@ -96,6 +96,9 @@ describe("POST /api/user/drafts/[draftId]/attachments/uploads", () => {
     ).resolves.toEqual({
       draftId: "r-1",
       attachmentId: "file-1",
+      filename: "report.pdf",
+      mimeType: "application/pdf",
+      size: LARGE_SIZE,
       sessionUri: SESSION_URI,
       totalBytes: 5_000_000,
       nextOffset: 0,

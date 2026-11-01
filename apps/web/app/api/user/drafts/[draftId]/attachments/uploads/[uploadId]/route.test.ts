@@ -217,6 +217,51 @@ describe("/api/user/drafts/[draftId]/attachments/uploads/[uploadId]", () => {
       TOTAL_BYTES,
     );
   });
+
+  it("returns the listed id when the draft renamed the uploaded file", async () => {
+    const completeDraftAttachmentUpload = vi.fn().mockResolvedValue(undefined);
+    createEmailProvider.mockResolvedValue({
+      ...provider,
+      completeDraftAttachmentUpload,
+    });
+    provider.getDraftAttachments.mockResolvedValue({
+      messageId: "message-2",
+      attachments: [
+        {
+          id: "big.bin:application/octet-stream:100",
+          filename: "big.bin",
+          mimeType: "application/octet-stream",
+          size: 100,
+        },
+      ],
+    });
+    await saveDraftAttachmentUpload("account-1", UPLOAD_ID, {
+      draftId: "r-1",
+      attachmentId: "file-1",
+      filename: "big.bin",
+      mimeType: "application/octet-stream",
+      size: 100,
+      sessionUri: "imap:draft-upload:abc123",
+      totalBytes: TOTAL_BYTES,
+      nextOffset: 0,
+    });
+    await putChunk({ start: 0, length: GMAIL_UPLOAD_CHUNK_BYTES });
+    const last = await putChunk({
+      start: GMAIL_UPLOAD_CHUNK_BYTES,
+      length: 10,
+    });
+    await expect(last.json()).resolves.toMatchObject({
+      status: "complete",
+      attachmentId: "big.bin:application/octet-stream:100",
+    });
+    expect(completeDraftAttachmentUpload).toHaveBeenCalledWith(
+      "r-1",
+      expect.any(Buffer),
+    );
+    expect(completeDraftAttachmentUpload.mock.calls[0]?.[1].byteLength).toBe(
+      TOTAL_BYTES,
+    );
+  });
 });
 
 function putChunk({

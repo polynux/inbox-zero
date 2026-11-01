@@ -2322,7 +2322,17 @@ ${messageContent}
       ]);
       const result = await this.getDraftAttachments(draftId);
       if (!result) throw draftNotFoundError("attach to");
-      return { ...result, attachmentId: attachment.id };
+      // Bridge strips the stamped X-Attachment-Id, so the stored file lists
+      // under a derived id: hand back the id the draft actually lists, which
+      // is what removeDraftAttachment matches on.
+      const listed = result.attachments.find(
+        (item) =>
+          item.id === attachment.id ||
+          (item.filename === attachment.filename &&
+            item.mimeType === attachment.mimeType &&
+            item.size === attachment.size),
+      );
+      return { ...result, attachmentId: listed?.id ?? attachment.id };
     });
   }
 

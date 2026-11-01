@@ -118,7 +118,12 @@ export const PUT = withEmailProvider(
 async function completeUploadResponse(
   emailProvider: EmailProvider,
   draftId: string,
-  upload: { attachmentId: string },
+  upload: {
+    attachmentId: string;
+    filename?: string;
+    mimeType?: string;
+    size?: number;
+  },
 ) {
   const attachments = await emailProvider.getDraftAttachments(draftId);
   if (!attachments)
@@ -126,9 +131,24 @@ async function completeUploadResponse(
       "This draft is no longer available. Check Sent before trying again.",
       404,
     );
+  // IMAP servers can strip the stamped attachment id (Bridge drops
+  // X-Attachment-Id), so the file lists under a derived id: return the id
+  // the draft actually lists, which is what removal matches on.
+  const listed =
+    attachments.attachments.find((item) => item.id === upload.attachmentId) ??
+    (upload.filename === undefined ||
+    upload.mimeType === undefined ||
+    upload.size === undefined
+      ? undefined
+      : attachments.attachments.find(
+          (item) =>
+            item.filename === upload.filename &&
+            item.mimeType === upload.mimeType &&
+            item.size === upload.size,
+        ));
   return NextResponse.json({
     status: "complete",
-    attachmentId: upload.attachmentId,
+    attachmentId: listed?.id ?? upload.attachmentId,
     ...attachments,
   } satisfies UploadDraftMessageChunkResponse);
 }

@@ -60,6 +60,9 @@ export const POST = withEmailProvider(
       sessionUri: upload.sessionUri,
       totalBytes: upload.totalBytes,
       nextOffset: 0,
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+      size: attachment.size,
     });
     return NextResponse.json({
       type: upload.type,

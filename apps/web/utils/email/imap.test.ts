@@ -107,6 +107,13 @@ function rewriteRawThreading(raw: string, uid: number): string {
     : rewritten;
 }
 
+function stripAttachmentIds(raw: string): string {
+  return raw
+    .split("\r\n")
+    .filter((line) => !/^x-attachment-id:/i.test(line))
+    .join("\r\n");
+}
+
 type FakeImapTestClient = {
   client: ImapFlow;
   opened: string[];
@@ -385,7 +392,12 @@ function createFakeClient(
           return match?.[1].trim();
         };
         const rewritten = rewriteDraftHeaders && path === "Drafts";
-        const storedRaw = rewritten ? rewriteRawThreading(raw, nextUid) : raw;
+        // Bridge strips the stamped per-file X-Attachment-Id from draft
+        // parts, so files list under derived ids there.
+        const stripped = path === "Drafts" ? stripAttachmentIds(raw) : raw;
+        const storedRaw = rewritten
+          ? rewriteRawThreading(stripped, nextUid)
+          : stripped;
         mailbox.messages.push({
           uid: nextUid,
           date: new Date().toISOString(),
@@ -1468,10 +1480,12 @@ describe("ImapProvider stable draft ids", () => {
       content: Buffer.from("hello world"),
     });
 
-    expect(added.attachmentId).toBe("file-1");
+    // The fake strips X-Attachment-Id like Bridge, so the returned id is the
+    // derived id the draft lists — the one removal matches on.
+    expect(added.attachmentId).toBe("notes.txt:text/plain:11");
     expect(added.attachments).toHaveLength(1);
     expect(added.attachments[0]).toMatchObject({
-      id: "file-1",
+      id: "notes.txt:text/plain:11",
       filename: "notes.txt",
       mimeType: "text/plain",
     });
@@ -1489,7 +1503,7 @@ describe("ImapProvider stable draft ids", () => {
       subject: "two files",
       messageHtml: "<p>body</p>",
     });
-    await provider.addDraftAttachment(id, {
+    const first = await provider.addDraftAttachment(id, {
       id: "file-1",
       filename: "a.txt",
       mimeType: "text/plain",
@@ -1497,7 +1511,7 @@ describe("ImapProvider stable draft ids", () => {
       disposition: "attachment",
       content: Buffer.from("a"),
     });
-    await provider.addDraftAttachment(id, {
+    const second = await provider.addDraftAttachment(id, {
       id: "file-2",
       filename: "b.txt",
       mimeType: "text/plain",
@@ -1506,13 +1520,18 @@ describe("ImapProvider stable draft ids", () => {
       content: Buffer.from("b"),
     });
 
-    const removed = await provider.removeDraftAttachment(id, "file-1");
-
-    expect(removed.attachments.map((file) => file.id)).toEqual(["file-2"]);
-    expect(mailboxesOf(fake).Drafts).toHaveLength(1);
-    await expect(provider.removeDraftAttachment(id, "file-1")).rejects.toThrow(
-      /no longer on the draft/,
+    const removed = await provider.removeDraftAttachment(
+      id,
+      first.attachmentId,
     );
+
+    expect(removed.attachments.map((file) => file.id)).toEqual([
+      second.attachmentId,
+    ]);
+    expect(mailboxesOf(fake).Drafts).toHaveLength(1);
+    await expect(
+      provider.removeDraftAttachment(id, first.attachmentId),
+    ).rejects.toThrow(/no longer on the draft/);
   });
 
   it("sendDraft delivers attachments through SMTP", async () => {
@@ -1587,7 +1606,7 @@ describe("ImapProvider stable draft ids", () => {
     expect(upload.sessionUri.startsWith("imap:")).toBe(true);
     const slots = upload.parts.filter((part) => part.type === "attachment");
     expect(slots.map((slot) => slot.attachmentId).sort()).toEqual([
-      "file-1",
+      "a.txt:text/plain:1",
       "file-2",
     ]);
     expect(upload.totalBytes).toBeGreaterThan(4 * 1024 * 1024);
