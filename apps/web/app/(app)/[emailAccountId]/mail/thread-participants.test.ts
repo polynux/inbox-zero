@@ -105,6 +105,59 @@ describe("getThreadParticipantNames", () => {
     ).toEqual(["Bah", "me"]);
   });
 
+  it("names the senders of a mixed thread behind union list labels", () => {
+    // Engine list rows synthesize one message per sender sharing the
+    // conversation's union labels, so SENT on every message must not read a
+    // replied thread as sent-only.
+    expect(
+      getThreadParticipantNames(
+        [
+          message({
+            from: "Bah <bah@example.com>",
+            to: "owner@example.com",
+            labelIds: ["INBOX", "SENT"],
+          }),
+          message({
+            from: "owner@example.com",
+            to: "Bah <bah@example.com>",
+            labelIds: ["INBOX", "SENT"],
+          }),
+        ],
+        "owner@example.com",
+      ),
+    ).toEqual(["Bah", "me"]);
+  });
+
+  it("names the recipients of a sent-only thread behind union list labels", () => {
+    expect(
+      getThreadParticipantNames(
+        [
+          message({
+            from: "Association <alias@example.com>",
+            to: "Jordan <jordan@example.com>",
+            labelIds: ["SENT"],
+          }),
+        ],
+        "owner@example.com",
+      ),
+    ).toEqual(["Jordan"]);
+  });
+
+  it("falls back to me for a self-sent thread with no other recipient", () => {
+    expect(
+      getThreadParticipantNames(
+        [
+          message({
+            from: "owner@example.com",
+            to: "owner@example.com",
+            labelIds: ["INBOX", "SENT"],
+          }),
+        ],
+        "owner@example.com",
+      ),
+    ).toEqual(["me"]);
+  });
+
   it("keeps recipient names for a draft-only thread", () => {
     expect(
       getThreadParticipantNames(

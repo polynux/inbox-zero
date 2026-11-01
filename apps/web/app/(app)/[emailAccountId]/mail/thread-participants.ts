@@ -27,11 +27,19 @@ export function getThreadParticipantNames(
 
   // A sent-only thread names its recipients however the From reads: the
   // sender is one of the account's own addresses (aliases, plus-addressing,
-  // a renamed mailbox), which never equals the login email exactly.
+  // a renamed mailbox), which never equals the login email exactly. List rows
+  // share union labels across their synthesized messages, so SENT on every
+  // message only means sent-only when no other mailbox role is present.
   const hasOnlySentMessages =
     nonDraftMessages.length > 0 &&
-    nonDraftMessages.every((message) =>
-      message.labelIds?.includes(GmailLabel.SENT),
+    nonDraftMessages.every(
+      (message) =>
+        message.labelIds?.includes(GmailLabel.SENT) &&
+        !message.labelIds?.some((labelId) =>
+          [GmailLabel.INBOX, GmailLabel.TRASH, GmailLabel.SPAM].includes(
+            labelId,
+          ),
+        ),
     );
   const hasOnlyAccountOwnerAsSender =
     senders.size === 1 && senders.has(normalizedUserEmail);
