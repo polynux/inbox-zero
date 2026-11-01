@@ -87,6 +87,19 @@ function withoutProtonInternalIds(ids: string[], ownId?: string): string[] {
   });
 }
 
+// A parent's stored References minus Bridge's delivery artifacts, so a reply
+// sent from a draft threads on real ids only. Returns undefined when nothing
+// real remains.
+export function withoutInternalReferences(
+  references: string | undefined,
+): string | undefined {
+  if (!references) return;
+  const kept = withoutProtonInternalIds(parseMessageIdList(references)).map(
+    (id) => `<${id}>`,
+  );
+  return kept.length > 0 ? kept.join(" ") : undefined;
+}
+
 /**
  * Extract the root message ID from threading headers.
  * The References header lists Message-IDs oldest-first,

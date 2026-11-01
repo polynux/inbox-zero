@@ -64,26 +64,54 @@ export async function saveDraft(
 // The stable draft id names the draft's own Message-ID, not its UID: IMAP
 // can't edit a message, so an update APPENDs a new copy (new UID) and
 // expunges the old one. Folder-qualified ids would break on the second save.
-export function encodeImapDraftId(messageId: string): string {
+// Bridge rewrites a draft's threading headers on APPEND (In-Reply-To gone,
+// References replaced by its own internal id), so a reply draft also carries
+// its parent's Message-ID: `d.<b64 draftMid>.<b64 parentMid>`, still stable
+// across updates since neither id changes on re-APPEND. Replies created
+// before this carry the old `d.<b64>` form, which keeps resolving.
+export function encodeImapDraftId(
+  messageId: string,
+  parentId?: string,
+): string {
   const normalized = normalizeMessageId(messageId);
   if (!normalized) throw new SafeError("Draft Message-ID is missing");
-  return `d.${Buffer.from(normalized, "utf8").toString("base64url")}`;
+  const draft = Buffer.from(normalized, "utf8").toString("base64url");
+  const parent = parentId ? normalizeMessageId(parentId) : "";
+  if (!parent) return `d.${draft}`;
+  return `d.${draft}.${Buffer.from(parent, "utf8").toString("base64url")}`;
 }
 
 export function parseImapDraftId(draftId: string): string {
+  return parseImapDraftIds(draftId).messageId;
+}
+
+// Attach the parent Message-ID to a stable draft id after APPEND, so reply
+// threading survives servers that rewrite the stored draft's headers.
+export function encodeReplyDraftId(draftId: string, parentId: string): string {
+  return encodeImapDraftId(parseImapDraftId(draftId), parentId);
+}
+
+export function parseImapDraftIds(draftId: string): {
+  messageId: string;
+  parentId?: string;
+} {
   if (!draftId.startsWith("d.") || draftId.length <= 2)
     throw new SafeError(
       "Draft id is not a stable IMAP draft id (expected d.<message-id>)",
     );
-  let messageId: string;
-  try {
-    messageId = Buffer.from(draftId.slice(2), "base64url").toString("utf8");
-  } catch {
+  const [draftPart, parentPart, ...rest] = draftId.slice(2).split(".");
+  if (!draftPart || rest.length > 0)
     throw new SafeError("Draft id holds an undecodable Message-ID");
-  }
-  const normalized = normalizeMessageId(messageId);
-  if (!normalized) throw new SafeError("Draft id holds an empty Message-ID");
-  return normalized;
+  const messageId = normalizeMessageId(
+    Buffer.from(draftPart, "base64url").toString("utf8"),
+  );
+  if (!messageId) throw new SafeError("Draft id holds an empty Message-ID");
+  if (!parentPart) return { messageId };
+  const parentId = normalizeMessageId(
+    Buffer.from(parentPart, "base64url").toString("utf8"),
+  );
+  if (!parentId) throw new SafeError("Draft id holds an empty Message-ID");
+  return { messageId, parentId };
 }
 
 export function isImapDraftId(draftId: string): boolean {
@@ -96,7 +124,7 @@ export function isImapDraftId(draftId: string): boolean {
 export async function appendDraftMessage(
   client: ImapFlow,
   draftsFolder: string,
-  options: SaveDraftOptions & { messageId: string },
+  options: SaveDraftOptions & { messageId: string; parentId?: string },
 ): Promise<{ id: string; uid: number }> {
   const normalizedMessageId = normalizeMessageId(options.messageId);
   if (!normalizedMessageId) throw new SafeError("Draft Message-ID is missing");
@@ -134,7 +162,7 @@ export async function appendDraftMessage(
     throw new Error(
       "Failed to save draft: server did not return a UID (no UIDPLUS support)",
     );
-  return { id: encodeImapDraftId(normalizedMessageId), uid };
+  return { id: encodeImapDraftId(normalizedMessageId, options.parentId), uid };
 }
 
 export async function buildDraftMime(
@@ -289,8 +317,9 @@ export async function findDraftByMessageId(
 }
 
 // Resolve any draft id form to its current copy in the Drafts folder. Stable
-// ids (`d.` + Message-ID) survive updates; the legacy folder-qualified form
-// names one UID and goes stale after an update. Malformed ids throw
+// ids (`d.` + Message-ID, reply drafts also carrying the parent id) resolve
+// on the draft's own id and survive updates; the legacy folder-qualified
+// form names one UID and goes stale after an update. Malformed ids throw
 // SafeError; a well-formed id with no live copy resolves null.
 export async function resolveDraftUid(
   client: ImapFlow,

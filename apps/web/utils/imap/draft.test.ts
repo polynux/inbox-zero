@@ -1,7 +1,13 @@
 import type { ImapFlow } from "imapflow";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { findDraftsFolder } from "@/utils/imap/folder";
-import { parseImapDraftId, saveDraft } from "@/utils/imap/draft";
+import {
+  encodeImapDraftId,
+  encodeReplyDraftId,
+  parseImapDraftId,
+  parseImapDraftIds,
+  saveDraft,
+} from "@/utils/imap/draft";
 
 vi.mock("@/utils/imap/folder", () => ({
   findDraftsFolder: vi.fn(async () => "Drafts"),
@@ -143,5 +149,33 @@ describe("saveDraft", () => {
         text: "body",
       }),
     ).rejects.toThrow(/did not return a UID/i);
+  });
+});
+
+describe("reply draft ids", () => {
+  it("round-trips the draft and parent Message-IDs", () => {
+    const id = encodeImapDraftId("<draft@example.com>", "<parent@example.com>");
+    expect(parseImapDraftIds(id)).toEqual({
+      messageId: "draft@example.com",
+      parentId: "parent@example.com",
+    });
+    expect(parseImapDraftId(id)).toBe("draft@example.com");
+  });
+
+  it("keeps accepting the old single-part form", () => {
+    const id = encodeImapDraftId("<draft@example.com>");
+    expect(parseImapDraftIds(id)).toEqual({ messageId: "draft@example.com" });
+  });
+
+  it("attaches a parent id to an existing stable id", () => {
+    const id = encodeReplyDraftId(
+      encodeImapDraftId("<draft@example.com>"),
+      "<parent@example.com>",
+    );
+    expect(parseImapDraftIds(id).parentId).toBe("parent@example.com");
+  });
+
+  it("rejects a three-part id", () => {
+    expect(() => parseImapDraftIds("d.a.b.c")).toThrow(/undecodable/);
   });
 });

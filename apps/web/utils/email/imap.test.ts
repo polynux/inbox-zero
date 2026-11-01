@@ -91,6 +91,22 @@ function mailboxesOf(fake: { client: unknown }): Record<string, FakeMessage[]> {
   return list;
 }
 
+// Bridge's APPEND rewrite on the stored bytes: In-Reply-To is dropped and
+// References is replaced by a per-copy internal id, so reads that go through
+// the raw MIME (draft attachment parts, getMessage downloads) see the same
+// headers a live Bridge serves.
+function rewriteRawThreading(raw: string, uid: number): string {
+  const [head, ...body] = raw.split("\r\n\r\n");
+  const kept = (head ?? "")
+    .split("\r\n")
+    .filter((line) => !/^(in-reply-to|references):/i.test(line))
+    .join("\r\n");
+  const rewritten = `${kept}\r\nReferences: <fake-internal-${uid}@protonmail.internalid>`;
+  return body.length > 0
+    ? `${rewritten}\r\n\r\n${body.join("\r\n\r\n")}`
+    : rewritten;
+}
+
 type FakeImapTestClient = {
   client: ImapFlow;
   opened: string[];
@@ -101,9 +117,13 @@ type FakeImapTestClient = {
 
 function createFakeClient(
   mailboxes: FakeMailbox[],
-  options?: { uidPlus?: boolean },
+  options?: { uidPlus?: boolean; rewriteDraftHeaders?: boolean },
 ): FakeImapTestClient {
   const mailboxSupportsUidPlus = options?.uidPlus ?? true;
+  // Bridge rewrites a draft's threading headers on APPEND: In-Reply-To is
+  // dropped and References is replaced by its own internal id. Tests that
+  // need that behavior opt in so other suites keep exact headers.
+  const rewriteDraftHeaders = options?.rewriteDraftHeaders ?? false;
   const appended: Array<{ path: string; flags: string[] }> = [];
   const opened: string[] = [];
   let current = mailboxes[0];
@@ -364,6 +384,8 @@ function createFakeClient(
           const match = raw.match(new RegExp(`^${name}: (.*)$`, "im"));
           return match?.[1].trim();
         };
+        const rewritten = rewriteDraftHeaders && path === "Drafts";
+        const storedRaw = rewritten ? rewriteRawThreading(raw, nextUid) : raw;
         mailbox.messages.push({
           uid: nextUid,
           date: new Date().toISOString(),
@@ -372,11 +394,13 @@ function createFakeClient(
           cc: header("Cc"),
           bcc: header("Bcc"),
           subject: header("Subject"),
-          html: raw.split("\r\n\r\n").slice(1).join("\r\n\r\n"),
+          html: storedRaw.split("\r\n\r\n").slice(1).join("\r\n\r\n"),
           messageId: header("Message-ID"),
-          inReplyTo: header("In-Reply-To"),
-          references: header("References"),
-          raw,
+          inReplyTo: rewritten ? undefined : header("In-Reply-To"),
+          references: rewritten
+            ? `<fake-internal-${nextUid}@protonmail.internalid>`
+            : header("References"),
+          raw: storedRaw,
         });
         appended.push({ path, flags: flags ?? [] });
         return mailboxSupportsUidPlus ? { uid: nextUid } : undefined;
@@ -1567,6 +1591,88 @@ describe("ImapProvider stable draft ids", () => {
       "file-2",
     ]);
     expect(upload.totalBytes).toBeGreaterThan(4 * 1024 * 1024);
+  });
+
+  it("sendDraft threads on the parent when Bridge rewrote the stored draft", async () => {
+    const parentMessageId = "<parent-bridge@example.com>";
+    const parentReferences = "<root@example.com>";
+    const fake = createFakeClient(
+      [
+        {
+          path: "INBOX",
+          messages: [
+            message(7, "2026-01-01", "alice@example.com", "me@example.com", {
+              messageId: parentMessageId,
+              references: parentReferences,
+              subject: "thread",
+            }),
+          ],
+        },
+        draftsMailbox(),
+      ],
+      { rewriteDraftHeaders: true },
+    );
+    connection.client = fake.client;
+    const sent: Array<Record<string, unknown>> = [];
+    const sendSpy = vi
+      .spyOn(mailModule, "sendSmtpEmail")
+      .mockImplementation(async (_config, options) => {
+        sent.push(options as Record<string, unknown>);
+        return { messageId: "<smtp-sent@example.com>" };
+      });
+    try {
+      const provider = new ImapProvider(config);
+      const parent = await provider.getMessage(qualifiedId("INBOX", 7));
+      const { id } = await provider.createDraft({
+        to: "alice@example.com",
+        subject: "Re: thread",
+        messageHtml: "<p>reply</p>",
+        replyToMessageId: qualifiedId("INBOX", 7),
+      });
+      // The id carries the parent Message-ID past Bridge's rewrite.
+      expect(id.split(".")).toHaveLength(3);
+      await provider.updateDraft(id, { subject: "Re: thread (edited)" });
+      const stored = await provider.getDraft(id);
+      expect(stored?.headers["in-reply-to"]).toBeUndefined();
+
+      const { threadId } = await provider.sendDraft(id);
+
+      expect(threadId).toBe(parent.threadId);
+      expect(sent[0]).toMatchObject({
+        inReplyTo: parentMessageId,
+        references: `${parentReferences} ${parentMessageId}`,
+      });
+    } finally {
+      sendSpy.mockRestore();
+    }
+  });
+
+  it("sendDraft falls back to stored headers when the parent is gone", async () => {
+    const fake = createFakeClient(
+      [{ path: "INBOX", messages: [] }, draftsMailbox()],
+      { rewriteDraftHeaders: true },
+    );
+    connection.client = fake.client;
+    const sent: Array<Record<string, unknown>> = [];
+    const sendSpy = vi
+      .spyOn(mailModule, "sendSmtpEmail")
+      .mockImplementation(async (_config, options) => {
+        sent.push(options as Record<string, unknown>);
+        return { messageId: "<smtp-sent@example.com>" };
+      });
+    try {
+      const provider = new ImapProvider(config);
+      const { id } = await provider.createDraft({
+        to: "friend@example.com",
+        subject: "Hello",
+        messageHtml: "<p>Hi</p>",
+      });
+      const { threadId } = await provider.sendDraft(id);
+      expect(typeof threadId).toBe("string");
+      expect(sent).toHaveLength(1);
+    } finally {
+      sendSpy.mockRestore();
+    }
   });
 });
 

@@ -69,7 +69,10 @@ import {
   buildDraftMime,
   draftNotFoundError,
   encodeImapDraftId,
+  encodeReplyDraftId,
   findDraftByMessageId,
+  isImapDraftId,
+  parseImapDraftIds,
   readDraftAttachmentParts,
   resolveDraftUid,
   saveDraft,
@@ -89,6 +92,7 @@ import {
   isProtonInternalId,
   parseFallbackThreadId,
   parseThreadRootMessageId,
+  withoutInternalReferences,
 } from "@/utils/imap/thread";
 import { buildThreadingHeaders } from "@/utils/email/threading";
 import { extractEmailAddress, splitRecipientList } from "@/utils/email";
@@ -1362,21 +1366,25 @@ ${messageContent}
     return this.withConnection(async (client) => {
       // Thread a reply on the parent's headers: its Message-ID becomes
       // In-Reply-To and extends References, like replyToEmail does when
-      // sending directly. Proton-internal ids never anchor a thread.
+      // sending directly. Proton-internal ids never anchor a thread. Bridge
+      // rewrites those headers on APPEND, so the stable draft id also
+      // carries the parent Message-ID; sendDraft rebuilds threading from it.
       let inReplyTo = params.forwardedMessageId;
       let references: string | undefined;
+      let parentId: string | undefined;
       if (params.replyToMessageId) {
         const parent = await this.getMessage(params.replyToMessageId).catch(
           () => null,
         );
-        const parentId = parent?.headers["message-id"];
-        if (parentId && !isProtonInternalId(parentId)) {
+        const headerId = parent?.headers["message-id"];
+        if (headerId && !isProtonInternalId(headerId)) {
           const threading = buildThreadingHeaders({
-            headerMessageId: parentId,
+            headerMessageId: headerId,
             references: parent?.headers.references,
           });
           inReplyTo = threading.inReplyTo;
           references = threading.references || undefined;
+          parentId = headerId;
         } else {
           inReplyTo = params.replyToMessageId;
         }
@@ -1391,7 +1399,9 @@ ${messageContent}
         inReplyTo,
         references,
       });
-      return { id };
+      return {
+        id: parentId ? encodeReplyDraftId(id, parentId) : id,
+      };
     });
   }
 
@@ -1409,6 +1419,7 @@ ${messageContent}
     _executedRule?: { id: string; threadId: string; emailAccountId: string },
   ): Promise<{ draftId: string }> {
     return this.withConnection(async (client) => {
+      const parentId = email.headers["message-id"];
       const draftId = await saveDraft(client, {
         from: userEmail,
         to: args.to || email.headers.from,
@@ -1418,10 +1429,15 @@ ${messageContent}
             ? email.subject
             : `Re: ${email.subject}`),
         html: args.content,
-        inReplyTo: email.headers["message-id"],
+        inReplyTo: parentId,
         references: email.headers.references,
       });
-      return { draftId };
+      return {
+        draftId:
+          parentId && !isProtonInternalId(parentId)
+            ? encodeReplyDraftId(draftId, parentId)
+            : draftId,
+      };
     });
   }
 
@@ -1485,6 +1501,9 @@ ${messageContent}
 
   // Send the draft's current content via SMTP, then remove it from Drafts.
   // Bridge files sent mail into Sent itself; the provider never APPENDs.
+  // Bridge also rewrites the stored draft's threading headers, so a reply
+  // draft's id carries the parent Message-ID and threading is rebuilt from
+  // the live parent at send time — never from the stored draft's headers.
   async sendDraft(
     draftId: string,
   ): Promise<{ messageId: string; threadId: string }> {
@@ -1493,6 +1512,7 @@ ${messageContent}
       if (!resolved) throw draftNotFoundError("send");
       const headers = resolved.message.headers;
       const parts = await this.readDraftParts(client, resolved);
+      const threading = await this.resolveReplyThreading(client, draftId);
       const { messageId } = await sendSmtpEmail(this.config, {
         to: headers.to ?? "",
         from: headers.from || undefined,
@@ -1500,8 +1520,8 @@ ${messageContent}
         bcc: headers.bcc,
         subject: resolved.message.subject,
         html: resolved.message.textHtml ?? "",
-        inReplyTo: headers["in-reply-to"],
-        references: headers.references,
+        inReplyTo: threading?.inReplyTo ?? headers["in-reply-to"],
+        references: threading?.references ?? headers.references,
         ...(parts.length
           ? { attachments: parts.map((part) => toDraftMailAttachment(part)) }
           : {}),
@@ -1512,13 +1532,68 @@ ${messageContent}
       await client.messageDelete(String(resolved.uid), { uid: true });
       return {
         messageId,
-        threadId: buildThreadId(
-          headers.references,
-          headers["in-reply-to"],
-          headers["message-id"],
-        ),
+        threadId:
+          threading?.threadId ??
+          buildThreadId(
+            headers.references,
+            headers["in-reply-to"],
+            headers["message-id"],
+          ),
       };
     });
+  }
+
+  // Threading for a reply draft send: the parent Message-ID rides in the
+  // draft id (the stored draft's headers don't survive Bridge), so fetch
+  // the live parent and thread on it. Null when this isn't a reply draft
+  // or the parent is gone — the stored headers are the fallback then.
+  private async resolveReplyThreading(
+    client: ImapFlow,
+    draftId: string,
+  ): Promise<{
+    inReplyTo: string;
+    references?: string;
+    threadId: string;
+  } | null> {
+    if (!isImapDraftId(draftId)) return null;
+    const { parentId } = parseImapDraftIds(draftId);
+    if (!parentId || isProtonInternalId(parentId)) return null;
+    const parent = await this.fetchMessageByRfc822Id(client, parentId);
+    const headerId = parent?.headers["message-id"];
+    if (!headerId || isProtonInternalId(headerId)) return null;
+    const threading = buildThreadingHeaders({
+      headerMessageId: headerId,
+      references: withoutInternalReferences(parent?.headers.references),
+    });
+    return {
+      inReplyTo: threading.inReplyTo,
+      references: threading.references || undefined,
+      threadId: buildThreadId(
+        threading.references || undefined,
+        threading.inReplyTo,
+        headerId,
+      ),
+    };
+  }
+
+  // Same lookup as getMessageByRfc822MessageId, on an open connection: the
+  // send path already holds one and must not open a second per draft.
+  private async fetchMessageByRfc822Id(
+    client: ImapFlow,
+    rfc822MessageId: string,
+  ): Promise<ParsedMessage | null> {
+    const folders = await resolveSearchFolders(client);
+    for (const folder of folders) {
+      if (!(await openFolderSkippingNo(client, folder))) continue;
+      const uids = await searchImapMessages(
+        client,
+        { header: { "Message-ID": rfc822MessageId } },
+        1,
+      );
+      if (uids.length === 0) continue;
+      return fetchMessageByUid(client, uids[0]);
+    }
+    return null;
   }
 
   // --- Folders ---
