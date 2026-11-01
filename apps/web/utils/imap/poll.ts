@@ -119,7 +119,7 @@ export async function pollImapAccount(
             lastPolledAt: new Date(),
           },
         });
-        return { newMessages: 0 };
+        return { newMessages: 0, sawInboxMail: false };
       }
 
       // A different UIDVALIDITY means the server renumbered UIDs (RFC 3501
@@ -145,10 +145,10 @@ export async function pollImapAccount(
             lastPolledAt: new Date(),
           },
         });
-        return { newMessages: 0 };
+        return { newMessages: 0, sawInboxMail: false };
       }
 
-      if (uidNext == null) return { newMessages: 0 };
+      if (uidNext == null) return { newMessages: 0, sawInboxMail: false };
 
       const lastSeenUid = credential.lastSeenUid;
       if (uidNext <= lastSeenUid + 1) {
@@ -159,7 +159,7 @@ export async function pollImapAccount(
             data: { ...uidValidityUpdate, lastPolledAt: new Date() },
           });
         }
-        return { newMessages: 0 };
+        return { newMessages: 0, sawInboxMail: false };
       }
 
       // Search for messages with UID > lastSeenUid. RFC 3501: `UID n:*` also
@@ -175,7 +175,7 @@ export async function pollImapAccount(
         .slice(0, MAX_MESSAGES_PER_POLL);
 
       if (newUids.length === 0) {
-        return { newMessages: 0 };
+        return { newMessages: 0, sawInboxMail: false };
       }
 
       log.info("Found new IMAP messages", {
@@ -196,6 +196,7 @@ export async function pollImapAccount(
       // Oldest first, and the cursor moves once per handled UID so a run that
       // is killed mid-batch never replays the mail it already processed.
       let newMessages = 0;
+      let sawInboxMail = false;
       for (const uid of newUids) {
         if (deadline !== undefined && Date.now() >= deadline) {
           log.warn("Stopping IMAP poll at the time budget", {
@@ -224,6 +225,9 @@ export async function pollImapAccount(
               emailAccountId,
               messageId,
             });
+            // Automation skips its own mail, but the INBOX view still needs to
+            // refresh for it (self-sent mail lands here, not just in Sent).
+            sawInboxMail = true;
           } else {
             const processMessage = async () => {
               await processHistoryItem(
@@ -297,19 +301,20 @@ export async function pollImapAccount(
         await advanceImapPollCursor(credential.id, uid, uidValidityUpdate);
       }
 
-      return { newMessages };
+      return { newMessages, sawInboxMail };
     });
 
     // Gmail/Outlook webhooks push a mailbox hint so open tabs sync now
     // instead of waiting for the idle catch-up clock; a poll that found new
-    // INBOX mail does the same.
-    if (result.newMessages > 0) {
+    // INBOX mail does the same, including its own mail, which automation
+    // skips but the INBOX view still shows.
+    if (result.newMessages > 0 || result.sawInboxMail) {
       await notifyMailboxChanged({ emailAccountId, logger: log });
     }
 
     return {
       emailAccountId,
-      ...result,
+      newMessages: result.newMessages,
     };
   } catch (error) {
     const errorMessage =

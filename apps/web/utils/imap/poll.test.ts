@@ -469,6 +469,18 @@ describe("pollImapAccount", () => {
     expect(state.credential?.lastSeenUid).toBe(6);
   });
 
+  it("notifies open tabs for its own mail even though automation skips it", async () => {
+    setCursor(5);
+    state.mailboxUids = [1, 2, 3, 4, 5, 6];
+    state.fromAddress = "Me <Me@Example.com>";
+
+    const result = await pollImapAccount("email-account-1");
+
+    expect(result.newMessages).toBe(0);
+    expect(state.processed).toEqual([]);
+    expect(state.notifyCalls).toHaveLength(1);
+  });
+
   it("skips a message labelled SENT like Outlook's sent-items rule", async () => {
     setCursor(5);
     state.mailboxUids = [1, 2, 3, 4, 5, 6];
