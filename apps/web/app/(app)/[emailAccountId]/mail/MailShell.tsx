@@ -390,9 +390,10 @@ export function MailShell() {
     (split) => split.id === displayedActiveSplitId,
   )?.labelNames;
   const query: ThreadsQuery = useMemo(() => {
-    // Search overrides split/scope and covers the whole mailbox, matching
-    // what Gmail's and Outlook's own search boxes do by default.
-    if (searchQuery) return { q: searchQuery };
+    // Search narrows the open scope (sidebar type/label/folder) instead of
+    // discarding it, so ?type=trash&q=tag only matches trashed mail. Splits
+    // are still overridden: they slice the inbox, not an arbitrary view.
+    if (searchQuery) return { ...(scopeQuery ?? {}), q: searchQuery };
     if (scopeQuery) return scopeQuery;
 
     if (activeSplit?.id === OTHER_SPLIT_ID) return otherMailSplitQuery(splits);

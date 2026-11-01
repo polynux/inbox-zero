@@ -2,6 +2,7 @@
 
 import { useMemo } from "react";
 import type { MailPredicate } from "@inboxzero/mail-core/queries";
+import { threadsQueryToPredicate } from "@/utils/mail-engine/threads-query";
 import useSWR from "swr";
 import { useSWRConfig } from "swr";
 import { useEngineMailThreads } from "@/app/(app)/[emailAccountId]/mail/use-engine-mail-threads";
@@ -56,12 +57,27 @@ export function useCombinedMailThreads({
     if (isUnread) return { type: "unread" };
     return { type: "inbox" };
   }, [isUnread, labelNames, searchQuery]);
+  // A label split still scopes the list while searching; the text predicate
+  // ANDs with the label predicate instead of replacing it.
+  const searchPredicate = useMemo<MailPredicate | undefined>(
+    () =>
+      searchQuery && predicate
+        ? {
+            kind: "all",
+            predicates: [
+              predicate,
+              threadsQueryToPredicate({ q: searchQuery }),
+            ],
+          }
+        : undefined,
+    [predicate, searchQuery],
+  );
   const state = useEngineMailThreads({
     emailAccountId,
     accountIds: accountIds.length ? accountIds : [emailAccountId],
     accounts: accountsById,
     query,
-    predicate: searchQuery ? undefined : predicate,
+    predicate: searchPredicate ?? (searchQuery ? undefined : predicate),
     enabled,
   });
   return {

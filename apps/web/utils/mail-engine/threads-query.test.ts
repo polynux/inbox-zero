@@ -154,6 +154,30 @@ describe("threadsQueryToPredicate", () => {
     });
   });
 
+  it("ANDs a mailbox scope with free-text search", () => {
+    expect(threadsQueryToPredicate({ type: "trash", q: "IZTEST-tag" })).toEqual(
+      {
+        kind: "all",
+        predicates: [
+          { kind: "text", field: "any", value: "IZTEST-tag", match: "term" },
+          { kind: "mailbox", mailbox: "trash" },
+        ],
+      },
+    );
+  });
+
+  it("ANDs a label scope with free-text search", () => {
+    expect(
+      threadsQueryToPredicate({ labelId: "Labels/Work", q: "invoice" }),
+    ).toEqual({
+      kind: "all",
+      predicates: [
+        { kind: "text", field: "any", value: "invoice", match: "term" },
+        { kind: "membership", membership: "label", id: "Labels/Work" },
+      ],
+    });
+  });
+
   it("maps subject, from and to operators onto structured predicates", () => {
     expect(
       threadsQueryToPredicate({
